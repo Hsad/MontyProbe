@@ -201,6 +201,7 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		game.levels[Level_ID.Drones].completed = true
 		game.levels[Level_ID.Range].unlocked   = true
 		save_write(game)
+		popup_show_delayed(game, .Level_Complete, 1.5)
 	}
 
 	if l4.message_timer > 0 do l4.message_timer -= dt
@@ -349,12 +350,16 @@ l4_draw_ui :: proc(game: ^Game_State) {
 		rl.DrawText("top hypotheses (object : evidence)", i32(panel_x) + 10, i32(by), 12,
 			Color{160, 180, 200, 180})
 		by += 16
+		mlh_obj := -1
+		if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count {
+			mlh_obj = lm.hypotheses[lm.mlh_idx].object_idx
+		}
 		for k in 0..<3 {
 			if top[k] < 0 do continue
 			fill := i32(clamp(topv[k] / max_evid, 0, 1) * 200)
 			row_y := by + f32(k) * 16
 			rl.DrawRectangle(i32(panel_x) + 10, i32(row_y), 200, 12, Color{25, 25, 35, 200})
-			row_c := top[k] == lm.hypotheses[lm.mlh_idx].object_idx ? Color{c.r, c.g, c.b, 220} : Color{120, 140, 170, 180}
+			row_c := top[k] == mlh_obj ? Color{c.r, c.g, c.b, 220} : Color{120, 140, 170, 180}
 			if fill > 0 do rl.DrawRectangle(i32(panel_x) + 10, i32(row_y), fill, 12, row_c)
 			rl.DrawText(fmt.ctprintf("%s  %.1f", db.objects[top[k]].name, topv[k]),
 				i32(panel_x) + 220, i32(row_y), 11, Color{200, 210, 230, 200})

@@ -266,7 +266,7 @@ l2_probe_infer :: proc(game: ^Game_State, wobj_idx: int, cmp: CMP_Message, disp:
 		if lm.winner_obj >= 0 {
 			game.levels[Level_ID.Touch].completed = true
 			game.levels[Level_ID.Drones].unlocked = true
-			popup_show(game, .Level_Complete)
+			popup_show_delayed(game, .Level_Complete, 1.5)
 		}
 	} else {
 		active := lm_active_count(lm)

@@ -114,7 +114,7 @@ l0_update :: proc(game: ^Game_State, dt: f32) {
 				game.levels[Level_ID.Motion].completed = true
 				game.levels[Level_ID.Smell].unlocked = true
 				game.ship.sensors += {.Chemical}
-				popup_show(game, .Level_Complete)
+				popup_show_delayed(game, .Level_Complete, 1.5)
 			} else {
 				l0.message = "Waypoint reached! Next bearing updated."
 				l0.message_timer = 3

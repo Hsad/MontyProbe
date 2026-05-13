@@ -217,7 +217,7 @@ l1_update :: proc(game: ^Game_State, dt: f32) {
 				game.levels[Level_ID.Smell].completed = true
 				game.levels[Level_ID.Light].unlocked = true
 				game.ship.sensors += {.Light_Probe}
-				popup_show(game, .Level_Complete)
+				popup_show_delayed(game, .Level_Complete, 1.5)
 			}
 		} else if tag_idx >= 0 {
 			l1.message = "Too far to tag. Get closer!"

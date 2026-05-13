@@ -47,8 +47,10 @@ Popup_Kind :: enum {
 }
 
 Popup_State :: struct {
-	kind:       Popup_Kind,
-	selected:   int,       // 0 = first option (usually yes/continue), 1 = second
+	kind:          Popup_Kind,
+	selected:      int,       // 0 = first option (usually yes/continue), 1 = second
+	pending_kind:  Popup_Kind,
+	pending_timer: f32,       // counts down; when <= 0 with pending != None, popup opens
 }
 
 // MAX_LMS covers the mothership's primary LM + one per drone slot
@@ -154,6 +156,15 @@ game_init :: proc(game: ^Game_State) {
 }
 
 game_update :: proc(game: ^Game_State, dt: f32) {
+	// Pending popup: tick down the delay, then promote to active
+	if game.popup.pending_kind != .None && game.popup.kind == .None {
+		game.popup.pending_timer -= dt
+		if game.popup.pending_timer <= 0 {
+			popup_show(game, game.popup.pending_kind)
+			game.popup.pending_kind = .None
+		}
+	}
+
 	// Popups eat all input while active
 	if game.popup.kind != .None {
 		popup_update(game)
@@ -174,6 +185,14 @@ game_update :: proc(game: ^Game_State, dt: f32) {
 popup_show :: proc(game: ^Game_State, kind: Popup_Kind) {
 	game.popup.kind = kind
 	game.popup.selected = 0
+	game.popup.pending_kind = .None
+	game.popup.pending_timer = 0
+}
+
+// Show a popup after `delay` seconds — gives the moment to land
+popup_show_delayed :: proc(game: ^Game_State, kind: Popup_Kind, delay: f32) {
+	game.popup.pending_kind  = kind
+	game.popup.pending_timer = delay
 }
 
 popup_update :: proc(game: ^Game_State) {

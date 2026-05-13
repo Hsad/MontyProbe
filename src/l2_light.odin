@@ -202,7 +202,7 @@ l2_light_pulse :: proc(game: ^Game_State) {
 			game.levels[Level_ID.Light].completed = true
 			game.levels[Level_ID.Touch].unlocked  = true
 			game.ship.sensors += {.Contact}
-			popup_show(game, .Level_Complete)
+			popup_show_delayed(game, .Level_Complete, 1.5)
 			save_write(game)
 		}
 	}
