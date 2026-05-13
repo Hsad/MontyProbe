@@ -114,6 +114,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Drones",
 		description = "Launch drones. Each builds its own\nmodel. Watch them vote over radio.",
 		unlocked    = false,
+		vtable      = l4_drones_vtable(),
 	}
 	game.levels[Level_ID.Range] = {
 		name        = "Laser Range",

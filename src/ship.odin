@@ -36,12 +36,21 @@ Sensor_Kind :: enum {
 }
 
 Drone :: struct {
-	active:   bool,
-	pos:      Vec3,
-	vel:      Vec3,
-	heading:  f32,
-	sensors:  Sensor_Set,
-	trail:    [dynamic]Vec3,
+	active:        bool,
+	pos:           Vec3,
+	prev_pos:      Vec3,
+	vel:           Vec3,
+	heading:       f32,
+	sensors:       Sensor_Set,
+	color:         Color,
+
+	// Behaviour
+	target_wobj:   int,    // world object index being probed (-1 = none)
+	orbit_phase:   f32,    // current angle around target
+	orbit_radius:  f32,
+	probe_timer:   f32,    // seconds until next probe
+	probe_count:   int,
+	use_voting:    bool,   // whether this drone's LM listens to votes
 }
 
 ship_init :: proc(ship: ^Ship) {
@@ -57,11 +66,6 @@ ship_init :: proc(ship: ^Ship) {
 
 ship_cleanup :: proc(ship: ^Ship) {
 	delete(ship.trail)
-	for i in 0..<ship.drone_count {
-		if ship.drones[i].active {
-			delete(ship.drones[i].trail)
-		}
-	}
 }
 
 ship_forward :: proc(ship: ^Ship) -> Vec3 {
