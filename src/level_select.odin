@@ -11,8 +11,12 @@ import "core:math"
 @(private = "file")
 select_anim_t: f32 = 0
 
+@(private = "file")
+locked_flash: f32 = 0  // counts down when player tries to enter a locked level
+
 level_select_update :: proc(game: ^Game_State, dt: f32) {
 	select_anim_t += dt
+	if locked_flash > 0 do locked_flash -= dt
 
 	sel := int(game.selected_level)
 
@@ -25,7 +29,11 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 	game.selected_level = Level_ID(sel)
 
 	if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.SPACE) {
-		game_enter_level(game, game.selected_level)
+		if game.levels[game.selected_level].unlocked {
+			game_enter_level(game, game.selected_level)
+		} else {
+			locked_flash = 1.2
+		}
 	}
 
 	if rl.IsKeyPressed(.ESCAPE) {
@@ -131,6 +139,13 @@ level_select_draw :: proc(game: ^Game_State) {
 
 	if selected_info.description != nil {
 		rl.DrawText(selected_info.description, i32(preview_x), i32(desc_y) + 44, 18, Color{160, 180, 220, 220})
+	}
+
+	// Locked state indicator
+	if !selected_info.unlocked {
+		flash_alpha: u8 = locked_flash > 0 ? u8(min(locked_flash, 1) * 255) : 100
+		rl.DrawText("LOCKED — complete previous levels first", i32(preview_x),
+			i32(desc_y) + 110, 16, Color{255, 120, 120, flash_alpha})
 	}
 
 	// Monty concept hint
