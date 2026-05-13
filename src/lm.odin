@@ -126,7 +126,7 @@ lm_learn_step :: proc(lm: ^Learning_Module, cmp: CMP_Message, displacement: Vec3
 
 // Commit the learning buffer to a new object in the database.
 // Returns the new object index, or -1 on failure.
-lm_commit :: proc(lm: ^Learning_Module, db: ^Model_Database, name: string) -> int {
+lm_commit :: proc(lm: ^Learning_Module, db: ^Model_Database, name: cstring) -> int {
     if lm.mode != .Learning || lm.learn_count == 0 do return -1
 
     obj_idx := model_db_new_object(db, name)

@@ -168,8 +168,8 @@ l1_update :: proc(game: ^Game_State, dt: f32) {
 	ship := &game.ship
 
 	turn_rate: f32 = 2.0
-	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A)  { ship.heading -= turn_rate * dt }
-	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) { ship.heading += turn_rate * dt }
+	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A)  { ship.heading += turn_rate * dt }
+	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) { ship.heading -= turn_rate * dt }
 
 	accel: f32 = 8.0
 	drag: f32 = 2.0

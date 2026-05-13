@@ -36,7 +36,7 @@ Graph_Node :: struct {
 }
 
 Object_Graph :: struct {
-    name:       string,
+    name:       cstring,
     nodes:      [MAX_GRAPH_NODES]Graph_Node,
     node_count: int,
 }
@@ -50,7 +50,7 @@ model_db_init :: proc(db: ^Model_Database) {
     db.object_count = 0
 }
 
-model_db_new_object :: proc(db: ^Model_Database, name: string) -> int {
+model_db_new_object :: proc(db: ^Model_Database, name: cstring) -> int {
     if db.object_count >= MAX_OBJECTS do return -1
     idx := db.object_count
     db.objects[idx] = {}

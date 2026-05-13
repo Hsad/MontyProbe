@@ -79,10 +79,10 @@ l0_update :: proc(game: ^Game_State, dt: f32) {
 	// Steering
 	turn_rate: f32 = 2.0
 	if rl.IsKeyDown(.LEFT) || rl.IsKeyDown(.A) {
-		ship.heading -= turn_rate * dt
+		ship.heading += turn_rate * dt
 	}
 	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) {
-		ship.heading += turn_rate * dt
+		ship.heading -= turn_rate * dt
 	}
 
 	// Throttle

@@ -106,6 +106,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Hull Probe",
 		description = "Touch surfaces. Feel normals and\ntexture. Build your first object graph.",
 		unlocked    = false,
+		vtable      = l2_touch_vtable(),
 	}
 	game.levels[Level_ID.Drones] = {
 		name        = "Drone Fleet",
