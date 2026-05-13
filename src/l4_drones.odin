@@ -34,7 +34,7 @@ drone_palette := [NUM_DRONES]Color{
 L4_State :: struct {
 	current_target:   int,         // world object idx (-1 = none locked)
 	prev_target:      int,
-	identified:       [16]bool,    // which world objects voters have ID'd
+	identified:       [16]bool,    // which world objects ID'd in this play session
 	unique_ids:       int,
 	converged_step:   [NUM_DRONES]int,
 	last_vote_at:     f32,
@@ -43,6 +43,11 @@ L4_State :: struct {
 	message:          cstring,
 	message_timer:    f32,
 	show_help:        bool,
+
+	// Mode + per-mode performance tracking
+	all_voting:           bool,     // true = drones share, false = all solo
+	last_voting_steps:    f32,      // avg steps to converge during last voting run
+	last_solo_steps:      f32,      // avg steps to converge during last solo run
 }
 
 @(private = "file")
@@ -62,10 +67,11 @@ l4_init :: proc(game: ^Game_State) {
 	l4 = {}
 	l4.current_target = -1
 	l4.prev_target    = -1
+	l4.all_voting     = true
 	for i in 0..<NUM_DRONES { l4.converged_step[i] = -1 }
 	l4.show_help     = true
-	l4.message       = "Fly near an object — drones will probe it.\nVoters (orange/teal) converge faster than the solo drone (purple).\nIdentify 3 objects to win."
-	l4.message_timer = 8
+	l4.message       = "Fly near an object — drones probe whatever is closest.\nAll three are SHARING VOTES.\nPress [SPACE] to switch to solo (no sharing) and feel the difference."
+	l4.message_timer = 9
 
 	// Reset mothership at origin
 	game.ship.pos     = {0, 0, 0}
@@ -93,7 +99,7 @@ l4_init :: proc(game: ^Game_State) {
 		drone.orbit_phase  = f32(i) * (2 * math.PI / NUM_DRONES)
 		drone.orbit_radius = DRONE_ORBIT_R
 		drone.probe_timer  = 0
-		drone.use_voting   = i < 2
+		drone.use_voting   = l4.all_voting
 
 		pos := game.ship.pos + Vec3{
 			math.cos(drone.orbit_phase) * DRONE_ORBIT_R,
@@ -111,6 +117,26 @@ l4_init :: proc(game: ^Game_State) {
 		up         = {0, 1, 0},
 		fovy       = 60,
 		projection = .PERSPECTIVE,
+	}
+}
+
+// Record this run's average converged-step into the appropriate mode slot.
+// Only counts if at least one drone actually converged.
+l4_capture_run_avg :: proc(game: ^Game_State) {
+	sum: f32 = 0
+	n:   f32 = 0
+	for i in 0..<NUM_DRONES {
+		if l4.converged_step[i] > 0 {
+			sum += f32(l4.converged_step[i])
+			n   += 1
+		}
+	}
+	if n <= 0 do return
+	avg := sum / n
+	if l4.all_voting {
+		l4.last_voting_steps = avg
+	} else {
+		l4.last_solo_steps = avg
 	}
 }
 
@@ -153,6 +179,28 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 	if rl.IsKeyPressed(.ESCAPE) { popup_show(game, .Confirm_Leave_Level); return }
 	if rl.IsKeyPressed(.H)      { l4.show_help = !l4.show_help }
 
+	// Toggle voting mode — record the run that just ended, then flip every drone
+	if rl.IsKeyPressed(.SPACE) {
+		// Capture the current run's avg-converged-step before clearing
+		l4_capture_run_avg(game)
+
+		l4.all_voting = !l4.all_voting
+		for i in 0..<NUM_DRONES {
+			game.ship.drones[i].use_voting = l4.all_voting
+		}
+		// Reset LMs for the current target so the comparison is clean
+		if l4.current_target >= 0 {
+			l4_reset_drone_lms(game, l4.current_target)
+		}
+
+		mode_msg: cstring = "MODE: SOLO — each drone runs alone"
+		if l4.all_voting {
+			mode_msg = "MODE: VOTING — all drones share hypotheses"
+		}
+		l4.message       = mode_msg
+		l4.message_timer = 3
+	}
+
 	ship := &game.ship
 
 	// flight (same as other levels)
@@ -191,8 +239,9 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		}
 	}
 
-	// Target changed → fresh inference episode for all drones
+	// Target changed → record the finishing run, then reset every LM
 	if new_target != l4.current_target {
+		l4_capture_run_avg(game)
 		l4.prev_target    = l4.current_target
 		l4.current_target = new_target
 		l4_reset_drone_lms(game, new_target)
@@ -258,10 +307,16 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		}
 	}
 
-	// Did the voters converge on a new identification?
+	// Identification: count distinct objects that ≥2 drones agreed on
 	if l4.current_target >= 0 && !l4.identified[l4.current_target] {
-		voters_done := l4.converged_step[0] > 0 && l4.converged_step[1] > 0
-		if voters_done {
+		agree := 0
+		for i in 0..<NUM_DRONES {
+			lm := &game.lms[i + 1]
+			if lm.converged && lm.winner_obj == l4.current_target {
+				agree += 1
+			}
+		}
+		if agree >= 2 {
 			l4.identified[l4.current_target] = true
 			l4.unique_ids += 1
 			name := game.world.objects[l4.current_target].name
@@ -392,6 +447,12 @@ l4_draw_ui :: proc(game: ^Game_State) {
 	rl.DrawText(fmt.ctprintf("TARGET: %s", target_name), 14, 12, 18, Color{255, 220, 100, 220})
 	rl.DrawText(fmt.ctprintf("Identified: %d / %d", l4.unique_ids, UNIQUE_TO_WIN),
 		14, 36, 16, Color{120, 255, 160, 220})
+
+	mode_label:    cstring = l4.all_voting ? "MODE: VOTING (sharing)" : "MODE: SOLO (no sharing)"
+	mode_color:    Color   = l4.all_voting ? Color{120, 220, 255, 230} : Color{255, 180, 120, 230}
+	rl.DrawText(mode_label, 14, 60, 16, mode_color)
+	rl.DrawText("[SPACE] toggle", 14, 80, 12, Color{120, 140, 170, 180})
+
 	rl.DrawText("LEVEL 4: DRONE FLEET", i32(sw) - 240, 12, 16, Color{200, 140, 255, 200})
 
 	// Per-drone panels along the right side
@@ -408,8 +469,7 @@ l4_draw_ui :: proc(game: ^Game_State) {
 		rl.DrawRectangleLinesEx({panel_x, py, panel_w, panel_h}, 1,
 			Color{c.r, c.g, c.b, 180})
 
-		mode_str: cstring = drone.use_voting ? "VOTING" : "SOLO"
-		rl.DrawText(fmt.ctprintf("DRONE %d  (%s)", di, mode_str),
+		rl.DrawText(fmt.ctprintf("DRONE %d", di),
 			i32(panel_x) + 10, i32(py) + 8, 15, Color{c.r, c.g, c.b, 240})
 		rl.DrawText(fmt.ctprintf("probes: %d", drone.probe_count),
 			i32(panel_x) + 180, i32(py) + 8, 13, Color{200, 200, 220, 180})
@@ -486,18 +546,27 @@ l4_draw_ui :: proc(game: ^Game_State) {
 
 	// Help bar
 	if l4.show_help {
-		rl.DrawText("[WASD] Fly mothership   [H] help   [ESC] back",
+		rl.DrawText("[WASD] Fly mothership   [SPACE] toggle voting/solo   [H] help   [ESC] back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 
-	// Speedup comparison
-	if l4.converged_step[0] > 0 && l4.converged_step[1] > 0 {
-		v_avg := f32(l4.converged_step[0] + l4.converged_step[1]) / 2
-		solo_steps := l4.converged_step[2] > 0 ? f32(l4.converged_step[2]) : f32(game.ship.drones[2].probe_count)
-		solo_label: cstring = l4.converged_step[2] > 0 ? "solo converged" : "solo still running"
-		ratio := solo_steps / max(v_avg, 0.001)
-		rl.DrawText(fmt.ctprintf("VOTING ~%.1fx FASTER  (voters: ~%.0f steps   %s: %.0f)",
-			ratio, v_avg, solo_label, solo_steps),
+	// Head-to-head comparison — uses the most recent completed run of each mode
+	if l4.last_voting_steps > 0 || l4.last_solo_steps > 0 {
+		voting_label: cstring = "voting: —"
+		if l4.last_voting_steps > 0 {
+			voting_label = fmt.ctprintf("voting: %.1f steps", l4.last_voting_steps)
+		}
+		solo_label: cstring = "solo: —"
+		if l4.last_solo_steps > 0 {
+			solo_label = fmt.ctprintf("solo: %.1f steps", l4.last_solo_steps)
+		}
+		ratio_label: cstring = ""
+		if l4.last_voting_steps > 0 && l4.last_solo_steps > 0 {
+			ratio := l4.last_solo_steps / l4.last_voting_steps
+			ratio_label = fmt.ctprintf("   →   voting ~%.1fx faster", ratio)
+		}
+		rl.DrawText(fmt.ctprintf("RECENT RUNS — %s  |  %s%s",
+				voting_label, solo_label, ratio_label),
 			10, i32(sh) - 56, 14, Color{180, 220, 255, 200})
 	}
 }
