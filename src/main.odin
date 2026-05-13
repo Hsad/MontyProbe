@@ -13,17 +13,18 @@ main :: proc() {
 
 	rl.SetTargetFPS(60)
 
-	game := game_init()
-	defer game_cleanup(&game)
+	game := new(Game_State)
+	game_init(game)
+	defer { game_cleanup(game); free(game) }
 
 	rl.SetExitKey(.KEY_NULL) // We handle ESC ourselves
 	for !rl.WindowShouldClose() && !game.quit_requested {
 		dt := rl.GetFrameTime()
-		game_update(&game, dt)
+		game_update(game, dt)
 
 		rl.BeginDrawing()
 		rl.ClearBackground(Color{10, 10, 20, 255})
-		game_draw(&game)
+		game_draw(game)
 		rl.EndDrawing()
 	}
 }

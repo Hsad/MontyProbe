@@ -50,6 +50,9 @@ Popup_State :: struct {
 	selected:   int,       // 0 = first option (usually yes/continue), 1 = second
 }
 
+// MAX_LMS covers the mothership's primary LM + one per drone slot
+MAX_LMS :: MAX_DRONES + 1
+
 Game_State :: struct {
 	scene:          Scene,
 	ship:           Ship,
@@ -60,11 +63,13 @@ Game_State :: struct {
 	camera:         rl.Camera3D,
 	popup:          Popup_State,
 	quit_requested: bool,
+
+	// Monty core — shared across levels
+	model_db:       Model_Database,          // long-term object memory
+	lms:            [MAX_LMS]Learning_Module, // LM[0] = mothership, LM[1..] = drones
 }
 
-game_init :: proc() -> Game_State {
-	game: Game_State
-
+game_init :: proc(game: ^Game_State) {
 	game.scene = .Level_Select
 	game.selected_level = .Motion
 
@@ -135,8 +140,11 @@ game_init :: proc() -> Game_State {
 
 	ship_init(&game.ship)
 	world_init(&game.world)
+	model_db_init(&game.model_db)
+	for i in 0..<MAX_LMS {
+		lm_init(&game.lms[i], i)
+	}
 
-	return game
 }
 
 game_update :: proc(game: ^Game_State, dt: f32) {
