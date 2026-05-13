@@ -7,46 +7,42 @@ import "core:fmt"
 
 // Level 4 — Drone Fleet (Multi-LM Voting)
 //
-// Multiple drones, each running an independent Learning Module.
-// The mothership has pre-loaded models for every object in the world
-// (analytical seed — equivalent to having completed the Touch level).
+// 3 drones orbit the mothership. They probe whichever world object
+// is closest to the mothership — so you steer attention by flying.
+// Drones 0+1 share votes laterally; drone 2 is the solo control.
 //
-// Demonstrates the central Thousand Brains claim:
-//   "Five fingers touching a mug converge faster than one finger
-//    sequentially exploring it" — multi-column voting.
+// Objective: identify 3 unique objects.
 //
-// Setup:
-//   - 3 drones fly out and probe a chosen object simultaneously
-//   - Drones 0,1 share votes via lateral connections (lm_*_vote)
-//   - Drone 2 runs solo (no voting) — acts as the control
-// Watch:
-//   - Voters' hypothesis funnel collapses much faster than the solo drone
-//   - Convergence step counts shown side by side
-//   - Vote messages animate as flashes between drones
+// Watch the voter pair converge in fewer probes than the solo drone
+// on every target. Move on to the next object once voters converge.
 
 NUM_DRONES         :: 3
-DRONE_PROBE_PERIOD :: 0.45   // seconds between probes
-DRONE_ORBIT_R      :: 5.0
-DRONE_LAUNCH_TIME  :: 1.6    // seconds to fly out to first target
+DRONE_PROBE_PERIOD :: 0.42
+DRONE_ORBIT_R      :: 3.5     // around mothership
+PROBE_REACH        :: 11.0    // drone-to-target reach
+TARGET_LOCK_RANGE  :: 9.0     // mothership-to-object range to lock target
+TARGET_UNLOCK_DIST :: 14.0    // hysteresis — must move this far to drop target
+UNIQUE_TO_WIN      :: 3
 
 drone_palette := [NUM_DRONES]Color{
-	{255, 140,  80, 255},
-	{120, 220, 180, 255},
-	{200, 140, 255, 255},
+	{255, 140,  80, 255},   // voter A
+	{120, 220, 180, 255},   // voter B
+	{200, 140, 255, 255},   // solo control
 }
 
 @(private = "file")
 L4_State :: struct {
-	target_wobj:    int,          // which world object the fleet is investigating
-	launched:       bool,
-	launch_timer:   f32,
-	last_vote_at:   f32,
-	vote_pulse_t:   f32,          // for animating recent votes
-	converged_step: [NUM_DRONES]int,
-	completed:      bool,
-	message:        cstring,
-	message_timer:  f32,
-	show_help:      bool,
+	current_target:   int,         // world object idx (-1 = none locked)
+	prev_target:      int,
+	identified:       [16]bool,    // which world objects voters have ID'd
+	unique_ids:       int,
+	converged_step:   [NUM_DRONES]int,
+	last_vote_at:     f32,
+	vote_pulse_t:     f32,
+	completed:        bool,
+	message:          cstring,
+	message_timer:    f32,
+	show_help:        bool,
 }
 
 @(private = "file")
@@ -64,150 +60,234 @@ l4_drones_vtable :: proc() -> Level_Vtable {
 
 l4_init :: proc(game: ^Game_State) {
 	l4 = {}
-	l4.target_wobj   = 0
-	l4.show_help     = true
-	l4.message       = "Three drones, three Learning Modules.\nDrones 0+1 share votes; drone 2 is solo.\nWatch which one converges first."
-	l4.message_timer = 7
+	l4.current_target = -1
+	l4.prev_target    = -1
 	for i in 0..<NUM_DRONES { l4.converged_step[i] = -1 }
+	l4.show_help     = true
+	l4.message       = "Fly near an object — drones will probe it.\nVoters (orange/teal) converge faster than the solo drone (purple).\nIdentify 3 objects to win."
+	l4.message_timer = 8
 
-	// Mothership stays put, hovering
-	game.ship.pos     = {0, 4, 0}
-	game.ship.speed   = 0
+	// Reset mothership at origin
+	game.ship.pos     = {0, 0, 0}
+	game.ship.vel     = {0, 0, 0}
 	game.ship.heading = 0
+	game.ship.speed   = 0
 	clear(&game.ship.trail)
 
-	// Pre-load object models analytically
+	// Pre-load object models (ideal learning from ground truth)
 	seed_world_objects(&game.model_db, &game.world)
 
-	// Initialise drone LMs and put each in inference mode
+	// Reset all LMs but DON'T start inference yet — we wait for a target
 	for i in 0..<NUM_DRONES {
-		lm := &game.lms[i + 1]
-		lm_init(lm, i + 1)
-		lm_start_inference(lm, &game.model_db)
+		lm_init(&game.lms[i + 1], i + 1)
 	}
 
-	// Spawn drones at the mothership
+	// Spawn drones around mothership
 	game.ship.drone_count = NUM_DRONES
 	for i in 0..<NUM_DRONES {
 		drone := &game.ship.drones[i]
 		drone^ = {}
 		drone.active       = true
-		drone.pos          = game.ship.pos + Vec3{f32(i) * 0.6 - 0.6, 0, 0}
-		drone.prev_pos     = drone.pos
 		drone.color        = drone_palette[i]
-		drone.target_wobj  = l4.target_wobj
+		drone.target_wobj  = -1
 		drone.orbit_phase  = f32(i) * (2 * math.PI / NUM_DRONES)
 		drone.orbit_radius = DRONE_ORBIT_R
-		drone.probe_timer  = DRONE_LAUNCH_TIME + f32(i) * 0.1
-		drone.use_voting   = i < 2  // first two cooperate; last one is the solo control
+		drone.probe_timer  = 0
+		drone.use_voting   = i < 2
+
+		pos := game.ship.pos + Vec3{
+			math.cos(drone.orbit_phase) * DRONE_ORBIT_R,
+			f32(i - 1) * 0.5,
+			math.sin(drone.orbit_phase) * DRONE_ORBIT_R,
+		}
+		drone.pos      = pos
+		drone.prev_pos = pos
 	}
 
+	// Standard follow camera
 	game.camera = rl.Camera3D{
-		position   = {0, 22, 26},
-		target     = game.world.objects[l4.target_wobj].pos,
+		position   = {0, 18, 16},
+		target     = {0, 0, 0},
 		up         = {0, 1, 0},
 		fovy       = 60,
 		projection = .PERSPECTIVE,
 	}
 }
 
+l4_reset_drone_lms :: proc(game: ^Game_State, new_target: int) {
+	for i in 0..<NUM_DRONES {
+		lm := &game.lms[i + 1]
+		lm_init(lm, i + 1)
+		if new_target >= 0 {
+			lm_start_inference(lm, &game.model_db)
+		}
+		drone := &game.ship.drones[i]
+		drone.target_wobj = new_target
+		drone.probe_count = 0
+		drone.probe_timer = f32(i) * 0.15
+		l4.converged_step[i] = -1
+	}
+}
+
+// surface distance from ship to object (ignores object radius)
+l4_surface_dist :: proc(ship_pos: Vec3, obj: ^World_Object) -> f32 {
+	d := linalg.distance(ship_pos, obj.pos) - obj.size.x
+	if d < 0 do d = 0
+	return d
+}
+
+l4_pick_target :: proc(game: ^Game_State) -> int {
+	closest := -1
+	best: f32 = TARGET_LOCK_RANGE
+	for i in 0..<len(game.world.objects) {
+		d := l4_surface_dist(game.ship.pos, &game.world.objects[i])
+		if d < best {
+			best = d
+			closest = i
+		}
+	}
+	return closest
+}
+
 l4_update :: proc(game: ^Game_State, dt: f32) {
 	if rl.IsKeyPressed(.ESCAPE) { popup_show(game, .Confirm_Leave_Level); return }
 	if rl.IsKeyPressed(.H)      { l4.show_help = !l4.show_help }
-	if rl.IsKeyPressed(.R)      { l4_init(game); return }
-	if rl.IsKeyPressed(.SPACE)  {
-		// Pick the next object as new target
-		l4.target_wobj = (l4.target_wobj + 1) % len(game.world.objects)
-		for i in 0..<NUM_DRONES {
-			lm_init(&game.lms[i+1], i+1)
-			lm_start_inference(&game.lms[i+1], &game.model_db)
-			d := &game.ship.drones[i]
-			d.target_wobj  = l4.target_wobj
-			d.probe_count  = 0
-			d.probe_timer  = 0.2 + f32(i) * 0.1
-			l4.converged_step[i] = -1
+
+	ship := &game.ship
+
+	// flight (same as other levels)
+	turn_rate: f32 = 2.0
+	if rl.IsKeyDown(.LEFT)  || rl.IsKeyDown(.A) { ship.heading += turn_rate * dt }
+	if rl.IsKeyDown(.RIGHT) || rl.IsKeyDown(.D) { ship.heading -= turn_rate * dt }
+	accel: f32 = 8.0
+	drag:  f32 = 2.0
+	if rl.IsKeyDown(.UP)   || rl.IsKeyDown(.W) { ship.speed += accel * dt }
+	else if rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.S) { ship.speed -= accel * dt }
+	else { ship.speed *= (1 - drag * dt) }
+	ship.speed = clamp(ship.speed, -5, 15)
+	ship_update(ship, dt)
+
+	// target selection with hysteresis
+	new_target := l4.current_target
+
+	if l4.current_target >= 0 {
+		// keep current target if still in range; drop if too far
+		d := l4_surface_dist(ship.pos, &game.world.objects[l4.current_target])
+		if d > TARGET_UNLOCK_DIST {
+			new_target = -1
 		}
-		l4.completed = false
-		game.camera.target = game.world.objects[l4.target_wobj].pos
 	}
 
-	target_pos := game.world.objects[l4.target_wobj].pos
+	if new_target < 0 {
+		// search for a fresh target
+		new_target = l4_pick_target(game)
+	} else {
+		// also check if something much closer appeared (allow switching)
+		closer := l4_pick_target(game)
+		if closer >= 0 && closer != l4.current_target {
+			d_cur  := l4_surface_dist(ship.pos, &game.world.objects[l4.current_target])
+			d_new  := l4_surface_dist(ship.pos, &game.world.objects[closer])
+			if d_new < d_cur - 2.5 do new_target = closer
+		}
+	}
 
-	// camera slowly orbits the target
-	t := f32(rl.GetTime()) * 0.15
-	game.camera.position = target_pos + Vec3{math.sin(t) * 22, 16, math.cos(t) * 22}
-	game.camera.target   = target_pos
+	// Target changed → fresh inference episode for all drones
+	if new_target != l4.current_target {
+		l4.prev_target    = l4.current_target
+		l4.current_target = new_target
+		l4_reset_drone_lms(game, new_target)
+	}
 
-	any_active_voter := false
-
-	// drone behaviour
+	// drone behaviour: orbit mothership; lean toward target when locked
 	for di in 0..<NUM_DRONES {
 		drone := &game.ship.drones[di]
 		lm    := &game.lms[di + 1]
 		if !drone.active do continue
 
-		// orbit around target
-		drone.orbit_phase += dt * 0.7
-		desired_pos := target_pos + Vec3{
-			math.cos(drone.orbit_phase) * drone.orbit_radius,
-			f32(di - 1) * 1.0,
-			math.sin(drone.orbit_phase) * drone.orbit_radius,
+		drone.orbit_phase += dt * 0.9
+		base_offset := Vec3{
+			math.cos(drone.orbit_phase) * DRONE_ORBIT_R,
+			f32(di - 1) * 0.6,
+			math.sin(drone.orbit_phase) * DRONE_ORBIT_R,
 		}
+		desired_pos := ship.pos + base_offset
+
+		// Lean toward target a bit so it visually "engages"
+		if l4.current_target >= 0 {
+			obj_pos := game.world.objects[l4.current_target].pos
+			lean := (obj_pos - ship.pos) * 0.25
+			desired_pos += lean
+		}
+
 		drone.prev_pos = drone.pos
-		drone.pos += (desired_pos - drone.pos) * dt * 3
+		drone.pos += (desired_pos - drone.pos) * dt * 4
 
-		// probe periodically
-		drone.probe_timer -= dt
-		if drone.probe_timer <= 0 && !lm.converged {
-			drone.probe_timer = DRONE_PROBE_PERIOD
-
-			cmp := l4_make_cmp_for_drone(game, drone)
-			disp: Vec3 = drone.probe_count == 0 ? Vec3{0, 0, 0} : drone.pos - drone.prev_pos
-			lm_step(lm, cmp, disp, &game.model_db)
-			drone.probe_count += 1
-
-			if lm.converged && l4.converged_step[di] < 0 {
-				l4.converged_step[di] = lm.step_count
+		// probing — only if we have a target and we're close enough to it
+		if l4.current_target >= 0 && !lm.converged {
+			target_obj := &game.world.objects[l4.current_target]
+			d_to_target := linalg.distance(drone.pos, target_obj.pos)
+			if d_to_target < PROBE_REACH {
+				drone.probe_timer -= dt
+				if drone.probe_timer <= 0 {
+					drone.probe_timer = DRONE_PROBE_PERIOD
+					cmp := l4_make_cmp_for_drone(game, drone)
+					disp: Vec3 = drone.probe_count == 0 ? Vec3{0,0,0} : drone.pos - drone.prev_pos
+					lm_step(lm, cmp, disp, &game.model_db)
+					drone.probe_count += 1
+					if lm.converged && l4.converged_step[di] < 0 {
+						l4.converged_step[di] = lm.step_count
+					}
+				}
 			}
 		}
 
-		// Voting between voter drones (after each one's step)
+		// voting — voters share their MLH; receivers prune inconsistent hypotheses
 		if drone.use_voting && lm.mlh_idx >= 0 {
 			vote, ok := lm_generate_vote(lm)
 			if ok {
 				for other_i in 0..<NUM_DRONES {
 					if other_i == di do continue
-					other_drone := &game.ship.drones[other_i]
-					if !other_drone.use_voting do continue
+					if !game.ship.drones[other_i].use_voting do continue
 					other_lm := &game.lms[other_i + 1]
-					offset := other_drone.pos - drone.pos
+					if other_lm.converged do continue
+					offset := game.ship.drones[other_i].pos - drone.pos
 					lm_receive_vote(other_lm, vote, offset, &game.model_db)
 					l4.last_vote_at = f32(rl.GetTime())
 				}
 			}
 		}
+	}
 
-		if drone.use_voting && !lm.converged { any_active_voter = true }
+	// Did the voters converge on a new identification?
+	if l4.current_target >= 0 && !l4.identified[l4.current_target] {
+		voters_done := l4.converged_step[0] > 0 && l4.converged_step[1] > 0
+		if voters_done {
+			l4.identified[l4.current_target] = true
+			l4.unique_ids += 1
+			name := game.world.objects[l4.current_target].name
+			l4.message       = fmt.ctprintf("Identified: %s  (%d/%d)\nFly to another object.", name, l4.unique_ids, UNIQUE_TO_WIN)
+			l4.message_timer = 4
+
+			if l4.unique_ids >= UNIQUE_TO_WIN && !l4.completed {
+				l4.completed = true
+				game.levels[Level_ID.Drones].completed = true
+				game.levels[Level_ID.Range].unlocked   = true
+				save_write(game)
+				popup_show_delayed(game, .Level_Complete, 1.5)
+			}
+		}
 	}
 
 	l4.vote_pulse_t = f32(rl.GetTime()) - l4.last_vote_at
 
-	// Completion: all three drones have converged (or at least the voters)
-	voters_done := l4.converged_step[0] > 0 && l4.converged_step[1] > 0
-	if voters_done && !l4.completed {
-		l4.completed = true
-		l4.message       = "Voters converged. The solo drone is still trying.\n[SPACE] for next object, or [ESC] to finish."
-		l4.message_timer = 6
-		game.levels[Level_ID.Drones].completed = true
-		game.levels[Level_ID.Range].unlocked   = true
-		save_write(game)
-		popup_show_delayed(game, .Level_Complete, 1.5)
-	}
+	// follow camera (like other levels)
+	fwd := ship_forward(ship)
+	game.camera.position = ship.pos + Vec3{0, 16, 0} - fwd * 12
+	game.camera.target   = ship.pos + fwd * 3
 
 	if l4.message_timer > 0 do l4.message_timer -= dt
 }
 
-// Build a CMP message representing a contact between a drone and its target
 l4_make_cmp_for_drone :: proc(game: ^Game_State, drone: ^Drone) -> CMP_Message {
 	obj := &game.world.objects[drone.target_wobj]
 	diff := drone.pos - obj.pos
@@ -226,18 +306,33 @@ l4_make_cmp_for_drone :: proc(game: ^Game_State, drone: ^Drone) -> CMP_Message {
 	}
 }
 
-// ─── 3D draw ─────────────────────────────────────────────────────────────────
+// ── 3D draw ─────────────────────────────────────────────────────────────────
 
 l4_draw :: proc(game: ^Game_State) {
 	rl.BeginMode3D(game.camera)
 	world_draw(&game.world, true)
 	ship_draw(&game.ship)
+	ship_draw_trail(&game.ship)
 
-	target := &game.world.objects[l4.target_wobj]
-	// Target halo
-	pulse := 0.5 + 0.5 * math.sin(f32(rl.GetTime()) * 2)
-	rl.DrawCircle3D(target.pos, target.size.x + 0.5, {0, 1, 0}, 0,
-		Color{255, 220, 100, u8(pulse * 120)})
+	// Highlight identified objects with a green wireframe
+	for i in 0..<len(game.world.objects) {
+		if !l4.identified[i] do continue
+		obj := &game.world.objects[i]
+		rl.DrawSphereWires(obj.pos, obj.size.x + 0.3, 10, 10, Color{120, 255, 160, 180})
+	}
+
+	// Target halo around the currently locked object
+	if l4.current_target >= 0 {
+		target := &game.world.objects[l4.current_target]
+		pulse := 0.5 + 0.5 * math.sin(f32(rl.GetTime()) * 3)
+		rl.DrawCircle3D(target.pos, target.size.x + 0.6, {0, 1, 0}, 0,
+			Color{255, 220, 100, u8(pulse * 140)})
+	}
+
+	// Probe range circle around mothership (faint reference)
+	pr_alpha: u8 = l4.current_target < 0 ? 80 : 30
+	rl.DrawCircle3D(game.ship.pos, TARGET_LOCK_RANGE, {0, 1, 0}, 0,
+		Color{100, 160, 220, pr_alpha})
 
 	// Draw drones
 	for di in 0..<NUM_DRONES {
@@ -245,29 +340,32 @@ l4_draw :: proc(game: ^Game_State) {
 		if !drone.active do continue
 		c := drone.color
 
-		rl.DrawSphere(drone.pos, 0.5, c)
-		rl.DrawSphereWires(drone.pos, 0.6, 6, 6, Color{c.r, c.g, c.b, 120})
+		rl.DrawSphere(drone.pos, 0.45, c)
+		rl.DrawSphereWires(drone.pos, 0.55, 6, 6, Color{c.r, c.g, c.b, 120})
 
-		// Probe beam to target surface
-		diff := drone.pos - target.pos
-		d := linalg.length(diff)
-		if d > 0.001 {
-			n := diff / d
-			contact := target.pos + n * target.size.x
-			beam_c := drone.use_voting ? c : Color{180, 180, 180, 200}
-			rl.DrawLine3D(drone.pos, contact, Color{beam_c.r, beam_c.g, beam_c.b, 160})
-			rl.DrawSphere(contact, 0.18, beam_c)
+		// Indicator: small cube above for non-voter (solo)
+		if !drone.use_voting {
+			rl.DrawCubeWires(drone.pos + Vec3{0, 1.1, 0}, 0.25, 0.25, 0.25, Color{200, 200, 200, 200})
 		}
 
-		// "no voting" indicator: dimmer
-		if !drone.use_voting {
-			rl.DrawCubeWires(drone.pos + Vec3{0, 1.2, 0}, 0.3, 0.3, 0.3, Color{180, 180, 180, 180})
+		// Probe beam to target surface (only when actually probing)
+		if l4.current_target >= 0 {
+			target := &game.world.objects[l4.current_target]
+			diff := drone.pos - target.pos
+			d := linalg.length(diff)
+			if d > 0.001 && d < PROBE_REACH * 1.2 {
+				n := diff / d
+				contact := target.pos + n * target.size.x
+				beam_c := drone.use_voting ? c : Color{180, 180, 180, 220}
+				rl.DrawLine3D(drone.pos, contact, Color{beam_c.r, beam_c.g, beam_c.b, 160})
+				rl.DrawSphere(contact, 0.16, beam_c)
+			}
 		}
 	}
 
-	// Animate vote lines between voter drones (recent)
-	if l4.vote_pulse_t < 0.4 {
-		alpha := u8((1 - l4.vote_pulse_t / 0.4) * 200)
+	// Vote pulse: animate lines between voter drones briefly after each vote
+	if l4.vote_pulse_t < 0.35 {
+		alpha := u8((1 - l4.vote_pulse_t / 0.35) * 200)
 		for a in 0..<NUM_DRONES {
 			if !game.ship.drones[a].use_voting do continue
 			for b in 0..<NUM_DRONES {
@@ -282,7 +380,7 @@ l4_draw :: proc(game: ^Game_State) {
 	rl.EndMode3D()
 }
 
-// ─── HUD / under-the-hood ───────────────────────────────────────────────────
+// ── HUD / under-the-hood ───────────────────────────────────────────────────
 
 l4_draw_ui :: proc(game: ^Game_State) {
 	sw := f32(rl.GetScreenWidth())
@@ -290,8 +388,10 @@ l4_draw_ui :: proc(game: ^Game_State) {
 	db := &game.model_db
 
 	// Top title bar
-	target_name := game.world.objects[l4.target_wobj].name
+	target_name: cstring = l4.current_target >= 0 ? game.world.objects[l4.current_target].name : "(none — fly closer)"
 	rl.DrawText(fmt.ctprintf("TARGET: %s", target_name), 14, 12, 18, Color{255, 220, 100, 220})
+	rl.DrawText(fmt.ctprintf("Identified: %d / %d", l4.unique_ids, UNIQUE_TO_WIN),
+		14, 36, 16, Color{120, 255, 160, 220})
 	rl.DrawText("LEVEL 4: DRONE FLEET", i32(sw) - 240, 12, 16, Color{200, 140, 255, 200})
 
 	// Per-drone panels along the right side
@@ -304,19 +404,16 @@ l4_draw_ui :: proc(game: ^Game_State) {
 		py    := 40 + f32(di) * (panel_h + 8)
 		c     := drone.color
 
-		// Panel
 		rl.DrawRectangle(i32(panel_x), i32(py), i32(panel_w), i32(panel_h), Color{0, 0, 0, 150})
 		rl.DrawRectangleLinesEx({panel_x, py, panel_w, panel_h}, 1,
 			Color{c.r, c.g, c.b, 180})
 
-		// Header
 		mode_str: cstring = drone.use_voting ? "VOTING" : "SOLO"
 		rl.DrawText(fmt.ctprintf("DRONE %d  (%s)", di, mode_str),
 			i32(panel_x) + 10, i32(py) + 8, 15, Color{c.r, c.g, c.b, 240})
 		rl.DrawText(fmt.ctprintf("probes: %d", drone.probe_count),
 			i32(panel_x) + 180, i32(py) + 8, 13, Color{200, 200, 220, 180})
 
-		// Hypothesis funnel
 		active := lm_active_count(lm)
 		total  := lm.hyp_count
 		frac   := total > 0 ? f32(active) / f32(total) : 0
@@ -335,8 +432,6 @@ l4_draw_ui :: proc(game: ^Game_State) {
 		for oi in 0..<db.object_count {
 			if best_evid[oi] > max_evid { max_evid = best_evid[oi] }
 		}
-
-		// Sort object indices by evidence (top 3)
 		top: [3]int = {-1, -1, -1}
 		topv: [3]f32 = {-99999, -99999, -99999}
 		for oi in 0..<db.object_count {
@@ -347,8 +442,7 @@ l4_draw_ui :: proc(game: ^Game_State) {
 		}
 
 		by := fy + 50
-		rl.DrawText("top hypotheses (object : evidence)", i32(panel_x) + 10, i32(by), 12,
-			Color{160, 180, 200, 180})
+		rl.DrawText("top hypotheses", i32(panel_x) + 10, i32(by), 12, Color{160, 180, 200, 180})
 		by += 16
 		mlh_obj := -1
 		if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count {
@@ -367,10 +461,13 @@ l4_draw_ui :: proc(game: ^Game_State) {
 
 		// Status
 		status_y := py + panel_h - 24
-		if lm.converged {
+		if lm.converged && lm.winner_obj >= 0 {
 			winner := db.objects[lm.winner_obj].name
-			rl.DrawText(fmt.ctprintf("CONVERGED  %s  in %d steps", winner, l4.converged_step[di]),
+			rl.DrawText(fmt.ctprintf("CONVERGED  %s  (%d steps)", winner, l4.converged_step[di]),
 				i32(panel_x) + 10, i32(status_y), 13, Color{120, 255, 160, 230})
+		} else if l4.current_target < 0 {
+			rl.DrawText("idle — no target", i32(panel_x) + 10, i32(status_y), 13,
+				Color{140, 140, 170, 180})
 		} else {
 			rl.DrawText("...accumulating", i32(panel_x) + 10, i32(status_y), 13,
 				Color{180, 180, 200, 180})
@@ -389,11 +486,11 @@ l4_draw_ui :: proc(game: ^Game_State) {
 
 	// Help bar
 	if l4.show_help {
-		rl.DrawText("[SPACE] next target   [R] restart   [H] help   [ESC] back",
+		rl.DrawText("[WASD] Fly mothership   [H] help   [ESC] back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 
-	// Speedup comparison footer (if solo has also converged or far behind)
+	// Speedup comparison
 	if l4.converged_step[0] > 0 && l4.converged_step[1] > 0 {
 		v_avg := f32(l4.converged_step[0] + l4.converged_step[1]) / 2
 		solo_steps := l4.converged_step[2] > 0 ? f32(l4.converged_step[2]) : f32(game.ship.drones[2].probe_count)
