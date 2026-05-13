@@ -42,6 +42,7 @@ Popup_Kind :: enum {
 	None,
 	Confirm_Leave_Level,
 	Confirm_Quit_Game,
+	Confirm_Reset,
 	Level_Complete,
 }
 
@@ -146,6 +147,8 @@ game_init :: proc(game: ^Game_State) {
 		lm_init(&game.lms[i], i)
 	}
 
+	// Apply saved progress on top of defaults
+	save_load(game)
 }
 
 game_update :: proc(game: ^Game_State, dt: f32) {
@@ -200,10 +203,17 @@ popup_update :: proc(game: ^Game_State) {
 			} else {
 				game.popup.kind = .None
 			}
+		case .Confirm_Reset:
+			if game.popup.selected == 0 {
+				save_reset(game)
+				game.popup.kind = .None
+			} else {
+				game.popup.kind = .None
+			}
 		case .Level_Complete:
 			game.popup.kind = .None
 			if game.popup.selected == 0 {
-				// Continue to next level
+				save_write(game)
 				next := next_level(game.current_level)
 				if next != nil {
 					game_enter_level(game, next.?)
@@ -211,6 +221,7 @@ popup_update :: proc(game: ^Game_State) {
 					game_return_to_select(game)
 				}
 			} else {
+				save_write(game)
 				game_return_to_select(game)
 			}
 		case .None:
@@ -274,6 +285,10 @@ popup_draw :: proc(game: ^Game_State) {
 		title = "Quit game?"
 		opt_a = "Quit"
 		opt_b = "Stay"
+	case .Confirm_Reset:
+		title = "Reset all progress?"
+		opt_a = "Reset"
+		opt_b = "Cancel"
 	case .Level_Complete:
 		next := next_level(game.current_level)
 		if next != nil {

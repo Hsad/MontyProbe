@@ -31,6 +31,10 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 	if rl.IsKeyPressed(.ESCAPE) {
 		popup_show(game, .Confirm_Quit_Game)
 	}
+
+	if rl.IsKeyPressed(.R) {
+		popup_show(game, .Confirm_Reset)
+	}
 }
 
 level_select_draw :: proc(game: ^Game_State) {
@@ -138,7 +142,7 @@ level_select_draw :: proc(game: ^Game_State) {
 	}
 
 	// Controls hint
-	rl.DrawText("[UP/DOWN] Select   [ENTER] Launch   [ESC] Quit", i32(sw / 2) - 190, i32(sh) - 30, 16, Color{80, 100, 140, 150})
+	rl.DrawText("[UP/DOWN] Select   [ENTER] Launch   [R] Reset progress   [ESC] Quit", i32(sw / 2) - 285, i32(sh) - 30, 16, Color{80, 100, 140, 150})
 }
 
 draw_ship_schematic :: proc(game: ^Game_State, cx, cy: f32, t: f32) {
