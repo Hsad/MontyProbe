@@ -101,6 +101,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Light Sensor",
 		description = "A directional brightness sensor.\nYour first feature-at-a-pose.",
 		unlocked    = false,
+		vtable      = l2_light_vtable(),
 	}
 	game.levels[Level_ID.Touch] = {
 		name        = "Contact Scanner",

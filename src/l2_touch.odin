@@ -539,7 +539,7 @@ l2_draw_ui :: proc(game: ^Game_State) {
 		rl.DrawText(help, 10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 
-	rl.DrawText("LEVEL 2: CONTACT SCANNER", i32(sw) - 300, i32(sh) - 28, 16,
+	rl.DrawText("LEVEL 3: CONTACT SCANNER", i32(sw) - 300, i32(sh) - 28, 16,
 		Color{100, 220, 150, 180})
 }
 

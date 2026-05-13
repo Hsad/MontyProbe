@@ -291,7 +291,7 @@ l4_draw_ui :: proc(game: ^Game_State) {
 	// Top title bar
 	target_name := game.world.objects[l4.target_wobj].name
 	rl.DrawText(fmt.ctprintf("TARGET: %s", target_name), 14, 12, 18, Color{255, 220, 100, 220})
-	rl.DrawText("LEVEL 3: DRONE FLEET", i32(sw) - 240, 12, 16, Color{200, 140, 255, 200})
+	rl.DrawText("LEVEL 4: DRONE FLEET", i32(sw) - 240, 12, 16, Color{200, 140, 255, 200})
 
 	// Per-drone panels along the right side
 	panel_w: f32 = 320

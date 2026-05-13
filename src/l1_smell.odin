@@ -216,7 +216,6 @@ l1_update :: proc(game: ^Game_State, dt: f32) {
 			if len(l1.found) >= l1.target_count {
 				game.levels[Level_ID.Smell].completed = true
 				game.levels[Level_ID.Light].unlocked = true
-				game.levels[Level_ID.Touch].unlocked = true  // bridge: Light not yet built
 				game.ship.sensors += {.Light_Probe}
 				popup_show(game, .Level_Complete)
 			}
