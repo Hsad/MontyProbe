@@ -1,0 +1,5 @@
+monty
+*.o
+*.bin
+result
+.direnv/
