@@ -24,8 +24,18 @@ SANDBOX_RANGE         :: 35.0
 SANDBOX_COOLDOWN      :: 0.15
 SANDBOX_PATCH_HALF    :: 0.45
 SANDBOX_PATCH_CELLS   :: 9
+SANDBOX_CMP_LOG       :: 10
 
 Sandbox_Mode :: enum { Single_Laser, Optic_Array }
+
+@(private = "file")
+Cmp_Log_Entry :: struct {
+	t:          f32,        // GetTime() at pulse
+	valid:      bool,       // false = "miss"
+	cell_idx:   int,        // -1 for single laser, 0..8 for array
+	obj_name:   cstring,
+	cmp:        CMP_Message,
+}
 
 @(private = "file")
 L9_State :: struct {
@@ -49,6 +59,21 @@ L9_State :: struct {
 
 	// Identifications per archetype
 	id_count:           [len(proc_archetypes)]int,
+
+	// CMP message log (ring buffer) — every probe appends here
+	cmp_log:            [SANDBOX_CMP_LOG]Cmp_Log_Entry,
+	cmp_log_head:       int,
+	cmp_log_count:      int,
+
+	// Step diagnostics for LM 0 (the "deep view" focus)
+	last_active:        int,
+	pruned_last_step:   int,
+	mlh_evidence_prev:  f32,
+	pulses_total:       int,
+
+	// Time when LM 0 most recently converged (for the "time to convergence" stat)
+	converge_time:      f32,
+	converge_steps:     int,
 
 	message:            cstring,
 	message_timer:      f32,
@@ -127,6 +152,40 @@ l9_raycast :: proc(world: ^World, origin, dir: Vec3) -> (idx: int, hit: Vec3, no
 }
 
 @(private = "file")
+log_append :: proc(entry: Cmp_Log_Entry) {
+	l9.cmp_log[l9.cmp_log_head] = entry
+	l9.cmp_log_head = (l9.cmp_log_head + 1) % SANDBOX_CMP_LOG
+	if l9.cmp_log_count < SANDBOX_CMP_LOG do l9.cmp_log_count += 1
+}
+
+// Capture LM 0 state before lm_step so we can show what changed
+@(private = "file")
+diag_pre :: proc(game: ^Game_State) {
+	lm := &game.lms[0]
+	l9.last_active        = lm_active_count(lm)
+	l9.mlh_evidence_prev  = 0
+	if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count {
+		l9.mlh_evidence_prev = lm.hypotheses[lm.mlh_idx].evidence
+	}
+}
+
+@(private = "file")
+diag_post :: proc(game: ^Game_State) {
+	lm := &game.lms[0]
+	now_active := lm_active_count(lm)
+	if l9.last_active > now_active {
+		l9.pruned_last_step = l9.last_active - now_active
+	} else {
+		l9.pruned_last_step = 0
+	}
+	// Mark convergence time on the transition
+	if lm.converged && l9.converge_time == 0 {
+		l9.converge_time  = f32(rl.GetTime())
+		l9.converge_steps = lm.step_count
+	}
+}
+
+@(private = "file")
 l9_record_id :: proc(game: ^Game_State, lm: ^Learning_Module) {
 	if !lm.converged || lm.winner_obj < 0 do return
 	if lm.winner_obj >= game.model_db.object_count do return
@@ -141,10 +200,14 @@ l9_pulse_single :: proc(game: ^Game_State) {
 	ship := &game.ship
 	fwd := ship_forward(ship)
 	idx, hit, normal := l9_raycast(&game.world, ship.pos, fwd)
+	l9.pulses_total += 1
+	now := f32(rl.GetTime())
+
 	if idx < 0 {
 		l9.last_cmp_valid = false
 		l9.message       = "Laser missed."
 		l9.message_timer = 1.0
+		log_append({t = now, valid = false})
 		return
 	}
 	obj := &game.world.objects[idx]
@@ -172,10 +235,13 @@ l9_pulse_single :: proc(game: ^Game_State) {
 
 	lm := &game.lms[0]
 	was_converged := lm.converged
+	diag_pre(game)
 	lm_step(lm, cmp, disp, &game.model_db)
+	diag_post(game)
 	if lm.converged && !was_converged {
 		l9_record_id(game, lm)
 	}
+	log_append({t = now, valid = true, cell_idx = -1, obj_name = obj.name, cmp = cmp})
 }
 
 @(private = "file")
@@ -199,6 +265,8 @@ l9_cell_ray :: proc(game: ^Game_State, i: int) -> (origin, dir: Vec3) {
 @(private = "file")
 l9_pulse_array :: proc(game: ^Game_State) {
 	l9.pulse_anim = 1.0
+	l9.pulses_total += 1
+	now := f32(rl.GetTime())
 	cmps:  [SANDBOX_PATCH_CELLS]CMP_Message
 	disps: [SANDBOX_PATCH_CELLS]Vec3
 	valid: [SANDBOX_PATCH_CELLS]bool
@@ -210,6 +278,7 @@ l9_pulse_array :: proc(game: ^Game_State) {
 		if idx < 0 {
 			l9.cell_hits[i] = false
 			valid[i] = false
+			log_append({t = now, valid = false, cell_idx = i})
 			continue
 		}
 		obj := &game.world.objects[idx]
@@ -227,18 +296,21 @@ l9_pulse_array :: proc(game: ^Game_State) {
 			confidence  = 1.0,
 		}
 		valid[i] = true
-		disps[i] = Vec3{0, 0, 0} // first probe per cell; movement handled coarsely
+		disps[i] = Vec3{0, 0, 0}
+		log_append({t = now, valid = true, cell_idx = i, obj_name = obj.name, cmp = cmps[i]})
 	}
 
-	// Step each LM
+	// Step each LM (capture diag around LM 0 only)
 	prev_converged: [SANDBOX_PATCH_CELLS]bool
 	for i in 0..<SANDBOX_PATCH_CELLS {
 		prev_converged[i] = game.lms[i].converged
 	}
+	diag_pre(game)
 	for i in 0..<SANDBOX_PATCH_CELLS {
 		if !valid[i] do continue
 		lm_step(&game.lms[i], cmps[i], disps[i], &game.model_db)
 	}
+	diag_post(game)
 
 	// Lateral voting — every LM broadcasts to every other LM
 	for sender in 0..<SANDBOX_PATCH_CELLS {
@@ -275,7 +347,12 @@ l9_reset_lms :: proc(game: ^Game_State) {
 		lm_init(&game.lms[i], i)
 		lm_start_inference(&game.lms[i], &game.model_db)
 	}
-	l9.probed_once = false
+	l9.probed_once       = false
+	l9.last_active       = 0
+	l9.pruned_last_step  = 0
+	l9.mlh_evidence_prev = 0
+	l9.converge_time     = 0
+	l9.converge_steps    = 0
 }
 
 l9_sandbox_update :: proc(game: ^Game_State, dt: f32) {
@@ -375,15 +452,48 @@ l9_sandbox_draw :: proc(game: ^Game_State) {
 
 // ── HUD ─────────────────────────────────────────────────────────────────────
 
+// Find top-N hypotheses by evidence across all objects (active only).
+@(private = "file")
+top_hypotheses :: proc(lm: ^Learning_Module, n: int, out_idx: []int, out_evid: []f32) -> int {
+	for i in 0..<n {
+		out_idx[i] = -1
+		out_evid[i] = -99999
+	}
+	count := 0
+	for hi in 0..<lm.hyp_count {
+		h := &lm.hypotheses[hi]
+		if !h.active do continue
+		e := h.evidence
+		// Insertion into top-N
+		pos := n
+		for j in 0..<n {
+			if e > out_evid[j] { pos = j; break }
+		}
+		if pos < n {
+			// shift right from pos
+			for j := n - 1; j > pos; j -= 1 {
+				out_evid[j] = out_evid[j - 1]
+				out_idx[j]  = out_idx[j - 1]
+			}
+			out_evid[pos] = e
+			out_idx[pos]  = hi
+			if count < n do count += 1
+		}
+	}
+	return count
+}
+
+// Rotation angle (radians) from identity for display
+@(private = "file")
+rot_angle_from_identity :: proc(r: Mat3) -> f32 {
+	return rotation_angle_between(r, MAT3_IDENTITY)
+}
+
 l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 	sw := f32(rl.GetScreenWidth())
 	sh := f32(rl.GetScreenHeight())
 	db := &game.model_db
-
-	// Top-left status
-	pw, ph: f32 = 320, 130
-	rl.DrawRectangle(10, 10, i32(pw), i32(ph), Color{0, 0, 0, 150})
-	rl.DrawRectangleLinesEx({10, 10, pw, ph}, 1, Color{60, 80, 120, 150})
+	lm0 := &game.lms[0]
 
 	mode_label: cstring = "SINGLE LASER"
 	mode_c := Color{255, 140, 140, 220}
@@ -391,93 +501,287 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 		mode_label = "OPTIC ARRAY (9 LMs)"
 		mode_c = Color{180, 220, 255, 230}
 	}
+
+	// ── Top-left status ─────────────────────────────────────────────────
+	pw, ph: f32 = 320, 134
+	rl.DrawRectangle(10, 10, i32(pw), i32(ph), Color{0, 0, 0, 160})
+	rl.DrawRectangleLinesEx({10, 10, pw, ph}, 1, Color{60, 80, 120, 150})
 	rl.DrawText(mode_label, 20, 18, 16, mode_c)
-	rl.DrawText("[TAB] cycle mode", 20, 40, 13, Color{120, 140, 170, 200})
+	rl.DrawText("[TAB] cycle mode", 20, 40, 12, Color{120, 140, 170, 200})
+	rl.DrawText(fmt.ctprintf("pos  x:%.0f  z:%.0f", game.ship.pos.x, game.ship.pos.z),
+		20, 60, 13, Color{200, 220, 240, 220})
+	rl.DrawText(fmt.ctprintf("objects in view: %d", len(game.world.objects)),
+		20, 78, 13, Color{200, 220, 240, 220})
+	rl.DrawText(fmt.ctprintf("model_db: %d objects", db.object_count),
+		20, 96, 13, Color{200, 220, 240, 220})
+	rl.DrawText(fmt.ctprintf("pulses total: %d", l9.pulses_total),
+		20, 114, 13, Color{200, 220, 240, 220})
 
-	rl.DrawText(fmt.ctprintf("Position  x:%.0f  z:%.0f", game.ship.pos.x, game.ship.pos.z),
-		20, 64, 14, Color{200, 220, 240, 220})
-	rl.DrawText(fmt.ctprintf("Objects in view: %d", len(game.world.objects)),
-		20, 84, 14, Color{200, 220, 240, 220})
-
-	// Active LM funnel summary
-	active_lms := 1
-	if l9.mode == .Optic_Array do active_lms = SANDBOX_PATCH_CELLS
-	total_hyps := 0
-	total_active := 0
-	conv := 0
-	for i in 0..<active_lms {
-		lm := &game.lms[i]
-		total_hyps   += lm.hyp_count
-		total_active += lm_active_count(lm)
-		if lm.converged do conv += 1
+	// ── LM 0 DEEP VIEW (left column, below status) ──────────────────────
+	dv_x: f32 = 10
+	dv_y: f32 = ph + 18
+	dv_w: f32 = 380
+	dv_h: f32 = sh - dv_y - 170    // leave room for log + footer
+	rl.DrawRectangle(i32(dv_x), i32(dv_y), i32(dv_w), i32(dv_h),
+		Color{0, 0, 0, 180})
+	rl.DrawRectangleLinesEx({dv_x, dv_y, dv_w, dv_h}, 1, Color{100, 160, 220, 180})
+	rl.DrawText("LM 0  —  DEEP VIEW", i32(dv_x) + 10, i32(dv_y) + 8, 15,
+		Color{120, 180, 255, 230})
+	rl.DrawText(fmt.ctprintf("steps: %d   active: %d / %d",
+			lm0.step_count, lm_active_count(lm0), lm0.hyp_count),
+		i32(dv_x) + 10, i32(dv_y) + 28, 12, Color{180, 200, 220, 200})
+	if l9.pruned_last_step > 0 {
+		rl.DrawText(fmt.ctprintf("(pruned %d last step)", l9.pruned_last_step),
+			i32(dv_x) + 200, i32(dv_y) + 28, 12, Color{255, 180, 100, 200})
 	}
-	rl.DrawText(fmt.ctprintf("LMs converged: %d / %d", conv, active_lms),
-		20, 104, 14, Color{120, 255, 160, 220})
 
-	// Right-side archetype tally
+	// MLH details
+	my := i32(dv_y) + 50
+	rl.DrawText("MLH", i32(dv_x) + 10, my, 12, Color{160, 180, 200, 200})
+	my += 18
+	if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count {
+		mlh := &lm0.hypotheses[lm0.mlh_idx]
+		mlh_obj_name: cstring = "—"
+		if mlh.object_idx >= 0 && mlh.object_idx < db.object_count {
+			mlh_obj_name = db.objects[mlh.object_idx].name
+		}
+		rl.DrawText(fmt.ctprintf("  object: %s", mlh_obj_name),
+			i32(dv_x) + 10, my, 13, Color{255, 220, 100, 230}); my += 16
+		rl.DrawText(fmt.ctprintf("  evidence: %.2f  (prev %.2f, Δ%+.2f)",
+				mlh.evidence, l9.mlh_evidence_prev, mlh.evidence - l9.mlh_evidence_prev),
+			i32(dv_x) + 10, my, 12, Color{200, 220, 240, 220}); my += 14
+		rl.DrawText(fmt.ctprintf("  loc: (%+.1f, %+.1f, %+.1f)",
+				mlh.location.x, mlh.location.y, mlh.location.z),
+			i32(dv_x) + 10, my, 12, Color{180, 200, 220, 200}); my += 14
+		ang := rot_angle_from_identity(mlh.rotation) * 180 / 3.14159
+		rl.DrawText(fmt.ctprintf("  rot: %.0f° (from identity)", ang),
+			i32(dv_x) + 10, my, 12, Color{180, 200, 220, 200}); my += 18
+	} else {
+		rl.DrawText("  (no MLH yet — pulse to start)", i32(dv_x) + 10, my, 13,
+			Color{140, 160, 190, 200}); my += 30
+	}
+
+	// Top-5 hypotheses
+	rl.DrawText("TOP HYPOTHESES", i32(dv_x) + 10, my, 12, Color{160, 180, 200, 200}); my += 18
+	top_idx:  [5]int
+	top_evid: [5]f32
+	n_top := top_hypotheses(lm0, 5, top_idx[:], top_evid[:])
+	max_top: f32 = 0.001
+	if n_top > 0 do max_top = max(top_evid[0], 0.001)
+	for i in 0..<n_top {
+		h := &lm0.hypotheses[top_idx[i]]
+		oname: cstring = "?"
+		if h.object_idx >= 0 && h.object_idx < db.object_count {
+			oname = db.objects[h.object_idx].name
+		}
+		bar_w := i32(dv_w) - 180
+		fill  := i32(clamp(top_evid[i] / max_top, 0, 1) * f32(bar_w))
+		rl.DrawText(oname, i32(dv_x) + 10, my, 12, Color{220, 230, 240, 220})
+		rl.DrawRectangle(i32(dv_x) + 140, my + 1, bar_w, 10, Color{25, 25, 35, 200})
+		c := mode_c
+		if i == 0 { c = Color{255, 220, 100, 230} }
+		if fill > 0 do rl.DrawRectangle(i32(dv_x) + 140, my + 1, fill, 10, c)
+		rl.DrawText(fmt.ctprintf("%.2f", top_evid[i]),
+			i32(dv_x) + 140 + bar_w + 4, my, 12, Color{200, 220, 240, 220})
+		my += 14
+	}
+	my += 6
+
+	// Threshold gauges
+	rl.DrawText("THRESHOLDS", i32(dv_x) + 10, my, 12, Color{160, 180, 200, 200}); my += 18
+
+	mlh_ev: f32 = 0
+	rival_ev: f32 = 0
+	if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count {
+		mlh_ev = lm0.hypotheses[lm0.mlh_idx].evidence
+		best_per_obj := [MAX_OBJECTS]f32{}
+		lm_best_evidence_per_object(lm0, db, best_per_obj[:])
+		mlh_obj := lm0.hypotheses[lm0.mlh_idx].object_idx
+		for oi in 0..<db.object_count {
+			if oi == mlh_obj do continue
+			if best_per_obj[oi] > rival_ev do rival_ev = best_per_obj[oi]
+		}
+	}
+
+	gauge_w: f32 = dv_w - 24
+	draw_gauge :: proc(x, y: i32, w: f32, label: cstring, value, threshold, scale: f32, ok: bool) {
+		rl.DrawText(label, x, y, 12, Color{200, 220, 240, 220})
+		bar_x := x + 90
+		bar_y := y + 2
+		bar_w := i32(w) - 90 - 80
+		rl.DrawRectangle(bar_x, bar_y, bar_w, 8, Color{25, 25, 35, 200})
+		fill := i32(clamp(value / scale, 0, 1) * f32(bar_w))
+		c := ok ? Color{120, 255, 160, 220} : Color{180, 200, 240, 220}
+		if fill > 0 do rl.DrawRectangle(bar_x, bar_y, fill, 8, c)
+		// Threshold marker
+		thr_x := bar_x + i32(clamp(threshold / scale, 0, 1) * f32(bar_w))
+		rl.DrawLine(thr_x, bar_y - 2, thr_x, bar_y + 10, Color{255, 220, 100, 230})
+		rl.DrawText(fmt.ctprintf("%.1f/%.1f", value, threshold),
+			bar_x + bar_w + 4, y, 11, Color{200, 220, 240, 200})
+	}
+
+	// Evidence vs converge_min_evid
+	draw_gauge(i32(dv_x) + 10, my, gauge_w, "evidence", mlh_ev, lm0.converge_min_evid,
+		lm0.converge_min_evid * 2.5, lm0.crit_evidence)
+	my += 16
+	// Margin vs converge_gap (margin = MLH - best rival)
+	margin := mlh_ev - rival_ev
+	draw_gauge(i32(dv_x) + 10, my, gauge_w, "margin", margin, lm0.converge_gap,
+		lm0.converge_gap * 2.5, lm0.crit_margin)
+	my += 16
+	// Pose uniqueness — simple ok/not via crit_pose; "value" is symbolic
+	pose_val: f32 = lm0.crit_pose ? 1.0 : 0.0
+	draw_gauge(i32(dv_x) + 10, my, gauge_w, "pose unique", pose_val, 1.0, 1.0,
+		lm0.crit_pose)
+	my += 16
+	// Stable steps toward symmetry path
+	draw_gauge(i32(dv_x) + 10, my, gauge_w, "stable", f32(lm0.stable_steps),
+		f32(lm0.sym_required_steps), f32(lm0.sym_required_steps) * 1.5,
+		lm0.is_symmetric)
+	my += 20
+
+	// Convergence state line
+	conv_text: cstring = "still working..."
+	conv_c := Color{200, 220, 240, 200}
+	if lm0.converged {
+		conv_text = "✓ CONVERGED"
+		conv_c = Color{120, 255, 160, 230}
+		if lm0.is_symmetric { conv_text = "✓ converged (symmetric)" ; conv_c = Color{220, 200, 100, 230} }
+	}
+	rl.DrawText(conv_text, i32(dv_x) + 10, my, 13, conv_c); my += 18
+
+	// Last step diagnostics for the MLH
+	if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count && lm0.step_count > 0 {
+		info := &lm0.step_info[lm0.mlh_idx]
+		rl.DrawText("LAST STEP (MLH)", i32(dv_x) + 10, my, 12, Color{160, 180, 200, 200}); my += 16
+		if info.node_idx >= 0 {
+			rl.DrawText(fmt.ctprintf("  node #%d  dist %.2f", info.node_idx, info.node_dist),
+				i32(dv_x) + 10, my, 12, Color{200, 220, 240, 220}); my += 14
+			rl.DrawText(fmt.ctprintf("  morph %+.2f   feat %.2f   Δ %+.2f",
+					info.morphology_score, info.feature_score, info.delta),
+				i32(dv_x) + 10, my, 12, Color{200, 220, 240, 220})
+		} else {
+			rl.DrawText("  (no node match — penalised)",
+				i32(dv_x) + 10, my, 12, Color{220, 140, 100, 200})
+		}
+	}
+
+	// ── Right-side archetype tally ──────────────────────────────────────
 	right_x := sw - 360
 	right_y: f32 = 10
 	right_w: f32 = 350
-	right_h: f32 = 50 + f32(len(proc_archetypes)) * 30
+	right_h: f32 = 38 + f32(len(proc_archetypes)) * 24
 	rl.DrawRectangle(i32(right_x), i32(right_y), i32(right_w), i32(right_h),
 		Color{0, 0, 0, 170})
 	rl.DrawRectangleLinesEx({right_x, right_y, right_w, right_h}, 1,
 		Color{100, 160, 220, 180})
-	rl.DrawText("ARCHETYPES IDENTIFIED", i32(right_x) + 10, i32(right_y) + 8, 14,
+	rl.DrawText("ARCHETYPES IDENTIFIED", i32(right_x) + 10, i32(right_y) + 8, 13,
 		Color{120, 180, 255, 220})
-
 	for ai in 0..<len(proc_archetypes) {
 		arch := &proc_archetypes[ai]
-		y := i32(right_y) + 34 + i32(ai) * 28
-		// Swatch
+		y := i32(right_y) + 30 + i32(ai) * 24
 		c := Color{u8(arch.material.color.x * 255),
 		           u8(arch.material.color.y * 255),
 		           u8(arch.material.color.z * 255), 255}
-		rl.DrawRectangle(i32(right_x) + 10, y + 2, 20, 16, c)
-		rl.DrawRectangleLines(i32(right_x) + 10, y + 2, 20, 16, Color{180, 200, 230, 200})
-		// Name
-		rl.DrawText(arch.name, i32(right_x) + 38, y + 2, 14,
+		rl.DrawRectangle(i32(right_x) + 10, y + 2, 18, 14, c)
+		rl.DrawRectangleLines(i32(right_x) + 10, y + 2, 18, 14, Color{180, 200, 230, 200})
+		rl.DrawText(arch.name, i32(right_x) + 34, y + 2, 13,
 			l9.id_count[ai] > 0 ? Color{220, 240, 255, 230} : Color{140, 160, 190, 200})
-		// Count
 		count_text: cstring = fmt.ctprintf("× %d", l9.id_count[ai])
 		count_c := l9.id_count[ai] > 0 ? Color{120, 255, 160, 230} : Color{100, 110, 130, 180}
-		rl.DrawText(count_text, i32(right_x) + i32(right_w) - 80, y + 2, 14, count_c)
+		rl.DrawText(count_text, i32(right_x) + i32(right_w) - 70, y + 2, 13, count_c)
 	}
 
-	// Compact hypothesis funnel for the primary LM (lms[0])
-	lm0 := &game.lms[0]
-	if lm0.hyp_count > 0 {
-		fy := i32(right_y + right_h) + 14
-		rl.DrawText("LM 0 hypotheses", i32(right_x) + 10, fy, 12, Color{160, 180, 200, 200})
-		rl.DrawRectangle(i32(right_x) + 10, fy + 16, i32(right_w) - 20, 10,
-			Color{25, 25, 35, 200})
-		af := f32(lm_active_count(lm0)) / f32(lm0.hyp_count)
-		rl.DrawRectangle(i32(right_x) + 10, fy + 16,
-			i32(af * f32(int(right_w) - 20)), 10, mode_c)
-		mlh: cstring = "—"
-		if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count {
-			mlh_obj := lm0.hypotheses[lm0.mlh_idx].object_idx
-			if mlh_obj >= 0 && mlh_obj < db.object_count {
-				mlh = db.objects[mlh_obj].name
-			}
+	// ── Right-side LM stats (under tally) ───────────────────────────────
+	st_y := right_y + right_h + 10
+	st_h: f32 = 130
+	rl.DrawRectangle(i32(right_x), i32(st_y), i32(right_w), i32(st_h),
+		Color{0, 0, 0, 170})
+	rl.DrawRectangleLinesEx({right_x, st_y, right_w, st_h}, 1,
+		Color{100, 160, 220, 180})
+	rl.DrawText("LM FLEET STATS", i32(right_x) + 10, i32(st_y) + 8, 13,
+		Color{120, 180, 255, 220})
+
+	active_lms := 1
+	if l9.mode == .Optic_Array do active_lms = SANDBOX_PATCH_CELLS
+	conv_count := 0
+	for i in 0..<active_lms {
+		if game.lms[i].converged do conv_count += 1
+	}
+	rl.DrawText(fmt.ctprintf("active LMs: %d", active_lms),
+		i32(right_x) + 10, i32(st_y) + 32, 13, Color{200, 220, 240, 220})
+	rl.DrawText(fmt.ctprintf("converged:  %d / %d", conv_count, active_lms),
+		i32(right_x) + 10, i32(st_y) + 50, 13, Color{120, 255, 160, 220})
+	if lm0.converged && l9.converge_steps > 0 {
+		rl.DrawText(fmt.ctprintf("LM 0 conv:  %d steps", l9.converge_steps),
+			i32(right_x) + 10, i32(st_y) + 68, 13, Color{180, 220, 255, 220})
+	}
+	// Convergence pills (inline) for LM 0
+	lm_draw_convergence_inline(lm0, i32(right_x) + 10, i32(st_y) + 92)
+
+	// ── CMP MESSAGE LOG (bottom strip) ──────────────────────────────────
+	log_h: f32 = 130
+	log_y := sh - log_h - 38
+	log_x := dv_x + dv_w + 10
+	log_w := right_x - log_x - 10
+	rl.DrawRectangle(i32(log_x), i32(log_y), i32(log_w), i32(log_h),
+		Color{0, 0, 0, 180})
+	rl.DrawRectangleLinesEx({log_x, log_y, log_w, log_h}, 1, Color{100, 160, 220, 180})
+	rl.DrawText("CMP MESSAGE LOG  (most recent → top)", i32(log_x) + 10, i32(log_y) + 6, 12,
+		Color{120, 180, 255, 220})
+
+	// Print newest-first
+	now := f32(rl.GetTime())
+	row_y := i32(log_y) + 26
+	for i in 0..<l9.cmp_log_count {
+		idx := (l9.cmp_log_head - 1 - i + SANDBOX_CMP_LOG) % SANDBOX_CMP_LOG
+		e := &l9.cmp_log[idx]
+		dt_ago := now - e.t
+		row_c := Color{200, 220, 240, 220}
+		if dt_ago > 2.5 do row_c = Color{120, 140, 170, 180}
+
+		if !e.valid {
+			tag: cstring = "miss"
+			if e.cell_idx >= 0 do tag = fmt.ctprintf("c%d miss", e.cell_idx)
+			rl.DrawText(fmt.ctprintf("[-%.1fs] %s", dt_ago, tag),
+				i32(log_x) + 10, row_y, 11, Color{220, 140, 100, 200})
+		} else {
+			loc := e.cmp.location
+			r  := e.cmp.features.roughness.?   or_else 0
+			t_ := e.cmp.features.temperature.? or_else 0
+			res := e.cmp.features.resonance.?  or_else 0
+			c, _ := e.cmp.features.color.?
+
+			prefix: cstring = "    "
+			if e.cell_idx >= 0 do prefix = fmt.ctprintf("c%d  ", e.cell_idx)
+
+			rl.DrawText(fmt.ctprintf("[-%.1fs] %s%s   loc(%+.0f,%+.0f)  rough %.2f  temp %.2f  reson %.2f",
+					dt_ago, prefix, e.obj_name, loc.x, loc.z, r, t_, res),
+				i32(log_x) + 30, row_y, 11, row_c)
+			// Color swatch for the color feature
+			rl.DrawRectangle(i32(log_x) + 10, row_y, 14, 11,
+				Color{u8(c.x * 255), u8(c.y * 255), u8(c.z * 255), 255})
 		}
-		rl.DrawText(fmt.ctprintf("MLH: %s", mlh), i32(right_x) + 10, fy + 30, 13,
-			Color{255, 220, 100, 220})
-		lm_draw_convergence_inline(lm0, i32(right_x) + 10, fy + 52)
+		row_y += 12
+		if row_y > i32(log_y + log_h) - 12 do break
+	}
+	if l9.cmp_log_count == 0 {
+		rl.DrawText("(no pulses yet — press [F])", i32(log_x) + 10, row_y, 12,
+			Color{140, 160, 190, 200})
 	}
 
-	// Message overlay
+	// ── Message overlay ─────────────────────────────────────────────────
 	if l9.message_timer > 0 && l9.message != nil {
 		alpha := u8(min(l9.message_timer * 1.5, 1) * 255)
 		msg_w := rl.MeasureText(l9.message, 18)
-		mx := i32(sw / 2) - msg_w / 2 - 100
-		my := i32(sh) - 80
+		mx := i32(sw / 2) - msg_w / 2
+		my := i32(sh - log_h - 100)
 		rl.DrawRectangle(mx - 14, my - 8, msg_w + 28, 50, Color{0, 0, 0, alpha / 2})
 		rl.DrawText(l9.message, mx, my, 18, Color{255, 255, 255, alpha})
 	}
 
 	if l9.show_help {
-		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto-pulse  [TAB] Mode  [N] New episode  [H] Help  [ESC] Back",
+		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto  [TAB] Mode  [N] New episode  [H] Help  [ESC] Back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 
