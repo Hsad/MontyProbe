@@ -184,11 +184,18 @@ Crystal Spire, Lava Rock, Methane Pocket, Metal Debris), each distinct
 on every feature dimension. Press [TAB] to toggle between single-laser
 and 9-cell optic-array modes. [N] resets the LMs for a fresh episode.
 
+Monty identifies object TYPES, not instances. Two different ice boulders
+in the world are both the same "Ice Boulder" model — the LM stays
+converged on the type while only the pose hypothesis (where on the ice
+boulder you're sensing) shifts. Different TYPES (flying from an Ice
+Boulder to an Iron Asteroid) are what break a converged inference.
+
 The sandbox auto-resets the LM when observations strongly contradict
-the current MLH for several pulses in a row — so after you've
-identified one object, you can fly to another and the LM will notice
-"this isn't what I thought" and start over by itself. Watch the
-"confusion streak" counter in the LM 0 deep view.
+the current MLH for 5 pulses in a row — so when you actually change
+object types, it notices "this isn't what I thought" and starts over.
+A few low-delta pulses (typical when you switch instances of the same
+type and the pose estimate is briefly stale) don't trigger a reset.
+Watch the "confusion streak" counter in the LM 0 deep view.
 
 THE MONTY CONCEPT
 This is free play — every concept from every prior level applies. The

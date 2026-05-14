@@ -26,6 +26,16 @@ SANDBOX_PATCH_HALF    :: 0.45
 SANDBOX_PATCH_CELLS   :: 9
 SANDBOX_CMP_LOG       :: 10
 
+// Confusion-reset tuning. The LM auto-resets when the MLH gets sustained
+// negative deltas, signalling that observations contradict its current
+// object type. The threshold sits at 5 — large enough to absorb a couple
+// of bad pulses from instance-switching (same type, new location) without
+// nuking a healthy converged state, small enough that a real type change
+// triggers within a few seconds.
+CONFUSION_THRESHOLD       :: 5
+CONFUSION_NEG_DELTA_GATE  :: f32(-0.4)   // delta below this counts as "wrong"
+CONFUSION_POS_DELTA_GATE  :: f32(0.4)    // delta above this decrements the streak
+
 Sandbox_Mode :: enum { Single_Laser, Optic_Array }
 
 @(private = "file")
@@ -190,28 +200,34 @@ diag_post :: proc(game: ^Game_State) {
 		l9.converge_steps = lm.step_count
 	}
 
-	// Track confusion at the MLH — strongly negative deltas suggest the
-	// world has changed under us (we converged on object A but are now
-	// looking at object B, whose hypotheses are gone).
-	CONFUSION_THRESHOLD :: 3
+	// Track confusion at the MLH. Strongly negative deltas across multiple
+	// pulses signal the LM has converged on the wrong object type — its
+	// alternative-type hypotheses were pruned away, so it can't flip
+	// naturally. Note: switching from one Iron Asteroid to ANOTHER iron
+	// asteroid usually produces only briefly-negative deltas (just the
+	// location estimate is stale, type still matches features), which is
+	// why the streak threshold is set fairly high.
 	if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count && lm.step_count > 0 {
 		delta := lm.step_info[lm.mlh_idx].delta
-		if delta < -0.3 {
+		if delta < CONFUSION_NEG_DELTA_GATE {
 			l9.confusion_streak += 1
-		} else if delta > 0.2 {
-			// Positive evidence — we're back on the rails
+		} else if delta > CONFUSION_POS_DELTA_GATE {
+			// Solidly positive evidence — we're back on the rails.
+			// Decrement (not zero) so a small relief doesn't wipe a long
+			// confusion run.
 			if l9.confusion_streak > 0 do l9.confusion_streak -= 1
 		}
+		// In between (-0.4 .. 0.4) the streak holds — same-instance pose
+		// adjustments often produce small deltas in this band.
 	}
 }
 
 // Returns true if we just auto-reset due to sustained confusion at MLH
 @(private = "file")
 maybe_self_reset :: proc(game: ^Game_State) -> bool {
-	CONFUSION_THRESHOLD :: 3
 	if l9.confusion_streak < CONFUSION_THRESHOLD do return false
 	l9_reset_lms(game)
-	l9.message       = "Self-reset — observations contradicted MLH for several steps in a row.\nLM started a new inference episode."
+	l9.message       = "Self-reset — features kept contradicting the MLH.\nLM started a new inference episode."
 	l9.message_timer = 3.5
 	return true
 }
@@ -687,10 +703,10 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 
 	// Confusion streak — counter that triggers an auto-reset when high enough
 	if l9.confusion_streak > 0 {
-		streak_c := Color{255, 180, 100, 220}
-		if l9.confusion_streak >= 2 do streak_c = Color{255, 140, 100, 230}
-		rl.DrawText(fmt.ctprintf("confusion streak: %d / 3  (auto-reset at 3)",
-				l9.confusion_streak),
+		streak_c := Color{255, 200, 120, 220}
+		if l9.confusion_streak >= CONFUSION_THRESHOLD - 2 do streak_c = Color{255, 140, 100, 230}
+		rl.DrawText(fmt.ctprintf("confusion streak: %d / %d  (auto-reset at %d)",
+				l9.confusion_streak, CONFUSION_THRESHOLD, CONFUSION_THRESHOLD),
 			i32(dv_x) + 10, my, 12, streak_c)
 		my += 16
 	}
