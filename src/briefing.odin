@@ -204,6 +204,17 @@ briefing_is_open :: proc() -> bool { return briefing_open }
 briefing_toggle  :: proc() { briefing_open = !briefing_open }
 briefing_close   :: proc() { briefing_open = false }
 
+// Helper — draw text in the loaded Hack font at a given size and colour.
+@(private = "file")
+draw :: proc(text: cstring, x, y: i32, size: f32, c: Color) {
+	rl.DrawTextEx(g_font, text, {f32(x), f32(y)}, size, 1, c)
+}
+
+@(private = "file")
+measure :: proc(text: cstring, size: f32) -> f32 {
+	return rl.MeasureTextEx(g_font, text, size, 1).x
+}
+
 briefing_draw :: proc(game: ^Game_State) {
 	if !briefing_open do return
 
@@ -212,78 +223,72 @@ briefing_draw :: proc(game: ^Game_State) {
 	info := game.levels[game.selected_level]
 
 	// Dim the menu underneath
-	rl.DrawRectangle(0, 0, i32(sw), i32(sh), Color{0, 0, 0, 200})
+	rl.DrawRectangle(0, 0, i32(sw), i32(sh), Color{0, 0, 0, 210})
 
-	// Panel
-	pw: f32 = min(sw - 80, 880)
-	ph: f32 = min(sh - 60, 720)
+	// Panel — wider and taller to accommodate larger fonts
+	pw: f32 = min(sw - 40, 1100)
+	ph: f32 = min(sh - 40, 760)
 	px := (sw - pw) / 2
 	py := (sh - ph) / 2
 	rl.DrawRectangleRounded({px, py, pw, ph}, 0.02, 8, Color{15, 20, 30, 250})
 	rl.DrawRectangleRoundedLinesEx({px, py, pw, ph}, 0.02, 8, 2, Color{100, 160, 220, 220})
 
 	// Header — level name + sensor + status
-	rl.DrawText(info.name, i32(px) + 24, i32(py) + 20, 32, Color{255, 255, 255, 255})
-	rl.DrawText(info.sensor_name, i32(px) + 24, i32(py) + 60, 16, Color{120, 220, 160, 200})
+	draw(info.name, i32(px) + 28, i32(py) + 22, 40, Color{255, 255, 255, 255})
+	draw(info.sensor_name, i32(px) + 28, i32(py) + 70, 22, Color{120, 220, 160, 200})
 
-	status_x := i32(px + pw) - 200
-	status_y := i32(py) + 24
+	// Status pill on the right
+	status_text: cstring = "UNLOCKED"
+	status_c := Color{120, 180, 255, 230}
 	if info.completed {
-		rl.DrawText("✓ COMPLETED", status_x, status_y, 16, Color{120, 255, 160, 230})
+		status_text = "✓ COMPLETED"
+		status_c = Color{120, 255, 160, 230}
 	} else if !info.unlocked {
-		rl.DrawText("LOCKED", status_x, status_y, 16, Color{255, 140, 120, 220})
-	} else {
-		rl.DrawText("UNLOCKED", status_x, status_y, 16, Color{120, 180, 255, 230})
+		status_text = "LOCKED"
+		status_c = Color{255, 140, 120, 220}
 	}
+	st_w := measure(status_text, 20)
+	draw(status_text, i32(px + pw) - i32(st_w) - 28, i32(py) + 28, 20, status_c)
 
 	// Horizontal rule
-	rl.DrawLine(i32(px) + 24, i32(py) + 90, i32(px + pw) - 24, i32(py) + 90,
+	rl.DrawLine(i32(px) + 28, i32(py) + 110, i32(px + pw) - 28, i32(py) + 110,
 		Color{60, 80, 120, 150})
 
-	// Overview (short description)
-	rl.DrawText("OVERVIEW", i32(px) + 24, i32(py) + 102, 13, Color{120, 180, 255, 200})
+	// Overview
+	draw("OVERVIEW", i32(px) + 28, i32(py) + 124, 18, Color{120, 180, 255, 200})
 	if info.description != nil {
-		rl.DrawText(info.description, i32(px) + 24, i32(py) + 122, 16,
+		draw(info.description, i32(px) + 28, i32(py) + 148, 21,
 			Color{220, 230, 240, 230})
 	}
 
-	// Detail — section-coloured paragraphs
+	// Detail
 	if info.detail != nil {
-		detail_y := i32(py) + 200
-		briefing_draw_detail(info.detail, i32(px) + 24, detail_y, i32(pw) - 48)
+		detail_y := i32(py) + 250
+		briefing_draw_detail(info.detail, i32(px) + 28, detail_y, i32(pw) - 56)
 	}
 
-	// Footer hints
-	hint_y := i32(py + ph) - 36
-	rl.DrawLine(i32(px) + 24, hint_y - 8, i32(px + pw) - 24, hint_y - 8,
+	// Footer
+	hint_y := i32(py + ph) - 44
+	rl.DrawLine(i32(px) + 28, hint_y - 10, i32(px + pw) - 28, hint_y - 10,
 		Color{60, 80, 120, 150})
 	if info.unlocked {
-		rl.DrawText("[ENTER] launch level   [D]/[ESC] back to map",
-			i32(px) + 24, hint_y, 14, Color{180, 200, 220, 220})
+		draw("[ENTER] launch level   [D]/[ESC] back to map",
+			i32(px) + 28, hint_y, 18, Color{180, 200, 220, 220})
 	} else {
-		rl.DrawText("Complete previous levels to unlock — [D]/[ESC] back to map",
-			i32(px) + 24, hint_y, 14, Color{180, 180, 200, 200})
+		draw("Complete previous levels to unlock — [D]/[ESC] back to map",
+			i32(px) + 28, hint_y, 18, Color{180, 180, 200, 200})
 	}
 }
 
 // Render the detail string with coloured section headers. Sections are
-// identified by all-caps single-line headers (WHAT'S HAPPENING / THE MONTY
-// CONCEPT / WATCH FOR); everything else is body text.
+// identified by known all-caps single-line headers; everything else is body.
 @(private = "file")
 briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
-	// Walk the cstring byte-by-byte, emitting one line at a time
-	body_size: i32 = 15
-	header_size: i32 = 14
-	line_h: i32 = 18
+	body_size:   f32 = 19
+	header_size: f32 = 20
+	line_h:      i32 = 24
 
 	cy := y
-
-	// We render the raw cstring with manual line-breaks the author already
-	// inserted. Detect headers by checking if a line is one of the known
-	// section names; colour accordingly.
-	header_what:  cstring = "WHAT'S HAPPENING"
-	header_monty: cstring = "THE MONTY CONCEPT"
-	header_watch: cstring = "WATCH FOR"
 
 	body := ([^]u8)(text)
 	i := 0
@@ -298,7 +303,7 @@ briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
 	}
 
 	for {
-		// scan one line into line_buf (null-terminated cstring)
+		// Scan one line into line_buf (null-terminated cstring)
 		line_len := 0
 		for line_len < len(line_buf) - 1 {
 			c := body[i]
@@ -311,27 +316,26 @@ briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
 		line_cstr := cstring(raw_data(line_buf[:]))
 
 		if line_len == 0 {
-			cy += line_h / 2  // blank line spacer
+			cy += line_h / 2
 		} else if is_header(line_cstr) {
-			cy += 6
-			c: Color = {120, 220, 255, 230}
+			cy += 8
+			c := Color{120, 220, 255, 230}
 			switch line_cstr {
 			case "WHAT'S HAPPENING":  c = Color{255, 220, 100, 230}
 			case "THE MONTY CONCEPT": c = Color{120, 220, 160, 230}
 			case "WATCH FOR":         c = Color{220, 160, 255, 230}
 			}
-			rl.DrawText(line_cstr, x, cy, header_size, c)
-			cy += line_h - 2
-			// underline
-			text_w := rl.MeasureText(line_cstr, header_size)
-			rl.DrawLine(x, cy - 4, x + text_w, cy - 4, c)
-			cy += 4
+			draw(line_cstr, x, cy, header_size, c)
+			tw := measure(line_cstr, header_size)
+			cy += line_h
+			rl.DrawLine(x, cy - 4, x + i32(tw), cy - 4, c)
+			cy += 6
 		} else {
-			rl.DrawText(line_cstr, x, cy, body_size, Color{210, 220, 235, 230})
+			draw(line_cstr, x, cy, body_size, Color{210, 220, 235, 230})
 			cy += line_h
 		}
 
 		if body[i] == 0 do break
-		i += 1  // skip the newline
+		i += 1
 	}
 }
