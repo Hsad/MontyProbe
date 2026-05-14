@@ -145,6 +145,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Fleet AI",
 		description = "Parts make wholes. Drones recognize\ncomponents, mothership assembles.",
 		unlocked    = false,
+		vtable      = l8_fleet_vtable(),
 	}
 
 	ship_init(&game.ship)
