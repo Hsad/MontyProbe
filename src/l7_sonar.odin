@@ -325,104 +325,93 @@ l7_sonar_draw_ui :: proc(game: ^Game_State) {
 	}
 	rl.DrawText(agree_text, 14, 38, 14, agree_color)
 
-	// Two side-by-side panels
-	panel_w: f32 = (sw - 30) / 2
-	panel_h: f32 = sh - 130
-	panel_y: f32 = 70
+	// Compact stacked panels on the right side
+	panel_w: f32 = 280
+	panel_h: f32 = 230
+	panel_x: f32 = sw - panel_w - 10
+	gap:     f32 = 8
+	panel_y_optic: f32 = 60
+	panel_y_sonar: f32 = panel_y_optic + panel_h + gap
 
-	// LM panel drawing helper
 	draw_lm_panel :: proc(game: ^Game_State, lm: ^Learning_Module, x, y, w, h: f32,
-	                     title: cstring, panel_color: Color,
-	                     features_shown: cstring, cmp: ^CMP_Message, last_valid: bool) {
+	                     title: cstring, panel_color: Color, features_shown: cstring,
+	                     cmp: ^CMP_Message, last_valid: bool) {
 		db := &game.model_db
-		rl.DrawRectangle(i32(x), i32(y), i32(w), i32(h), Color{0, 0, 0, 150})
+		rl.DrawRectangle(i32(x), i32(y), i32(w), i32(h), Color{0, 0, 0, 170})
 		rl.DrawRectangleLinesEx({x, y, w, h}, 2, panel_color)
-		rl.DrawText(title, i32(x) + 12, i32(y) + 10, 18, panel_color)
-		rl.DrawText(features_shown, i32(x) + 12, i32(y) + 32, 13, Color{200, 200, 220, 200})
 
-		// Hypothesis funnel
+		// Header
+		rl.DrawText(title, i32(x) + 8, i32(y) + 6, 14, panel_color)
+		rl.DrawText(features_shown, i32(x) + 8, i32(y) + 22, 11, Color{180, 200, 220, 200})
+
+		// Hypothesis funnel — slim bar
 		active := lm_active_count(lm)
 		total  := lm.hyp_count
 		frac   := total > 0 ? f32(active) / f32(total) : 0
-		hy := i32(y) + 60
-		rl.DrawText("hypotheses", i32(x) + 12, hy, 12, Color{160, 180, 200, 180})
-		rl.DrawRectangle(i32(x) + 12, hy + 16, i32(w) - 24, 12, Color{25, 25, 35, 200})
-		rl.DrawRectangle(i32(x) + 12, hy + 16, i32(f32(int(w) - 24) * frac), 12, panel_color)
-		rl.DrawText(fmt.ctprintf("%d / %d", active, total),
-			i32(x) + 12, hy + 30, 12, Color{200, 210, 230, 200})
+		hy := i32(y) + 40
+		rl.DrawRectangle(i32(x) + 8, hy, i32(w) - 16, 8, Color{25, 25, 35, 200})
+		rl.DrawRectangle(i32(x) + 8, hy, i32(f32(int(w) - 16) * frac), 8, panel_color)
+		rl.DrawText(fmt.ctprintf("hyps: %d / %d", active, total),
+			i32(x) + 8, hy + 10, 10, Color{160, 180, 200, 200})
 
-		// Top evidence bars
+		// Compact evidence bars
 		best_evid := [MAX_OBJECTS]f32{}
 		lm_best_evidence_per_object(lm, db, best_evid[:])
 		max_evid: f32 = 0.001
 		for oi in 0..<db.object_count {
 			if best_evid[oi] > max_evid do max_evid = best_evid[oi]
 		}
-		by := hy + 56
-		rl.DrawText("evidence per object", i32(x) + 12, by, 12, Color{160, 180, 200, 180})
-		by += 18
 		mlh_obj := -1
 		if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count {
 			mlh_obj = lm.hypotheses[lm.mlh_idx].object_idx
 		}
+		by := hy + 26
+		bar_x_off: i32 = 90
+		bar_w := i32(w) - bar_x_off - 38
 		for oi in 0..<db.object_count {
 			c := Color{180, 200, 240, 220}
 			if oi == mlh_obj do c = panel_color
-			fill := i32(clamp(best_evid[oi] / max_evid, 0, 1) * (w * 0.5))
-			rl.DrawText(db.objects[oi].name, i32(x) + 12, by, 13, c)
-			rl.DrawRectangle(i32(x) + 130, by, i32(w * 0.5), 12, Color{25, 25, 35, 200})
-			if fill > 0 do rl.DrawRectangle(i32(x) + 130, by, fill, 12, Color{c.r, c.g, c.b, 180})
+			rl.DrawText(db.objects[oi].name, i32(x) + 8, by, 10, c)
+			rl.DrawRectangle(i32(x) + bar_x_off, by, bar_w, 8, Color{25, 25, 35, 200})
+			fill := i32(clamp(best_evid[oi] / max_evid, 0, 1) * f32(bar_w))
+			if fill > 0 do rl.DrawRectangle(i32(x) + bar_x_off, by, fill, 8, Color{c.r, c.g, c.b, 180})
 			rl.DrawText(fmt.ctprintf("%.1f", best_evid[oi]),
-				i32(x) + 130 + i32(w * 0.5) + 8, by, 11, Color{180, 200, 220, 200})
-			by += 18
+				i32(x) + bar_x_off + bar_w + 4, by - 1, 10, Color{180, 200, 220, 200})
+			by += 13
 		}
 
-		// Latest CMP feature readout
-		by += 8
-		rl.DrawText("LATEST CMP FEATURES", i32(x) + 12, by, 12, Color{160, 180, 200, 200})
-		by += 18
+		// Latest CMP features — one compact line
+		fy := by + 4
+		rl.DrawText("CMP:", i32(x) + 8, fy, 10, Color{160, 180, 200, 180})
+		fx: i32 = 42
 		if last_valid {
-			any: bool
 			if c, ok := cmp.features.color.?; ok {
-				rl.DrawText(fmt.ctprintf("  color = (%.2f, %.2f, %.2f)", c.x, c.y, c.z),
-					i32(x) + 12, by, 13, Color{200, 220, 240, 220})
-				rl.DrawRectangle(i32(x) + i32(w) - 38, by - 1, 18, 16,
+				rl.DrawRectangle(i32(x) + fx, fy, 14, 10,
 					Color{u8(c.x * 255), u8(c.y * 255), u8(c.z * 255), 255})
-				by += 18; any = true
+				fx += 18
+				rl.DrawText("color", i32(x) + fx, fy, 10, Color{200, 220, 240, 200})
+				fx += 36
 			}
 			if r, ok := cmp.features.roughness.?; ok {
-				rl.DrawText(fmt.ctprintf("  roughness = %.2f", r),
-					i32(x) + 12, by, 13, Color{200, 220, 240, 220})
-				by += 18; any = true
+				rl.DrawText(fmt.ctprintf("rough %.2f", r), i32(x) + fx, fy, 10, Color{200, 220, 240, 200})
+				fx += 70
 			}
 			if r, ok := cmp.features.resonance.?; ok {
-				rl.DrawText(fmt.ctprintf("  resonance = %.2f", r),
-					i32(x) + 12, by, 13, Color{200, 220, 240, 220})
-				by += 18; any = true
-			}
-			if !any {
-				rl.DrawText("  (no features in this CMP)", i32(x) + 12, by, 13,
-					Color{160, 180, 200, 180})
-				by += 18
+				rl.DrawText(fmt.ctprintf("reson %.2f", r), i32(x) + fx, fy, 10, Color{200, 220, 240, 200})
 			}
 		} else {
-			rl.DrawText("  (no pulse yet)", i32(x) + 12, by, 13,
-				Color{160, 180, 200, 180})
-			by += 18
+			rl.DrawText("(no pulse)", i32(x) + fx, fy, 10, Color{140, 160, 180, 180})
 		}
 
-		// Convergence checklist at the bottom
-		ck_y := i32(y) + i32(h) - 100
-		lm_draw_convergence_checklist(lm, i32(x) + 12, ck_y)
+		// Inline convergence pills at bottom
+		lm_draw_convergence_inline(lm, i32(x) + 8, i32(y) + i32(h) - 18)
 	}
 
-	draw_lm_panel(game, lm_optic, 10, panel_y, panel_w, panel_h,
-		"OPTIC LM",  Color{100, 180, 255, 240},
-		"features: color + roughness",
+	draw_lm_panel(game, lm_optic, panel_x, panel_y_optic, panel_w, panel_h,
+		"OPTIC LM", Color{100, 180, 255, 240}, "color + roughness",
 		&l7.last_optic_cmp, l7.last_valid)
-	draw_lm_panel(game, lm_sonar, 20 + panel_w, panel_y, panel_w, panel_h,
-		"SONAR LM",  Color{220, 120, 220, 240},
-		"features: resonance only",
+	draw_lm_panel(game, lm_sonar, panel_x, panel_y_sonar, panel_w, panel_h,
+		"SONAR LM", Color{220, 120, 220, 240}, "resonance only",
 		&l7.last_sonar_cmp, l7.last_valid)
 
 	// Message overlay
