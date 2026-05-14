@@ -135,6 +135,44 @@ only way to disambiguate, sometimes the curiosity arrow is decisive.
 
 ---
 
+## World & Object Ideas
+
+The cockpit framing wants richer targets than the V1 abstract primitives.
+Two complementary scales:
+
+**Planetary scale** — what you'd see through a long-range scope. Each
+body has a layered feature stack the lower LMs pick up:
+  - Terrain class (rocky, icy, volcanic, gaseous)
+  - Albedo / reflectivity
+  - Water signatures (oceans, ice caps) — high IR/visual contrast
+  - Crater density / size distribution
+  - Radio beacons (artificial emitters at specific frequencies)
+  - Metallic stations in orbit (compositional sub-feature)
+  - Orbiting bodies (moons, ships, debris fields) — themselves further
+    objects to recognise
+
+Each of these maps cleanly to a CMP feature with a sensor that
+exposes it. Compositional recognition = "iron-rich planet + 2 ice
+moons + active beacon = MINING COLONY".
+
+**Station scale** — small enough to actually fly around, the better
+test of pose & orientation. A station's parts:
+  - Hatch (specific cylindrical port with universal docking ring)
+  - Window (rectangular, glow when occupied)
+  - Solar panel (long thin reflective plane)
+  - Antenna (line feature with periodic radio chirps)
+  - Engine bell (truncated cone, hot)
+  - Cargo container (faceted, fixed dimensions)
+
+Recognising a station = lower LMs spot the parts, higher LM checks the
+arrangement: "hatch on equator + windows in a row + solar panel on the
+sun side = HABITAT MODULE." Wrong arrangement of the same parts could
+be "FUEL DEPOT" or "DERELICT."
+
+The station-scale objects double as level-3 hierarchy: stations can
+be parts of larger constructs (orbital ring = N habitat modules
+arranged on a circle).
+
 ## Open Questions
 
 - Is there a "win" state in V2 or is it open-ended like a survival

@@ -89,6 +89,11 @@ L8_State :: struct {
 	identified_comps:   [8]bool,    // which composition indices have been matched
 	unique_comps:       int,
 
+	// HIGHER-LM persistent memory: which world objects have been identified
+	// by ANY lower LM at SOME point this level. Survives drone resets so the
+	// player can accumulate parts across many fly-by passes.
+	parts_seen:         [16]bool,
+
 	last_match_anim:    f32,
 	last_match_idx:     int,
 
@@ -118,7 +123,7 @@ l8_fleet_init :: proc(game: ^Game_State) {
 	l8.current_target = -1
 	l8.last_match_idx = -1
 	l8.show_help      = true
-	l8.message        = "Lower LMs (drones) identify single objects.\nThe mothership's HIGHER LM looks for known PART ARRANGEMENTS.\nFly between two related objects to trigger a compositional match."
+	l8.message        = "Drones identify single objects per fly-by.\nThe HIGHER LM accumulates identified parts across all your scans.\nFly near each object on the right list, then watch the model match."
 	l8.message_timer  = 10
 
 	game.ship.pos     = {0, 0, 0}
@@ -173,10 +178,12 @@ fleet_find_world_obj :: proc(game: ^Game_State, name: cstring) -> int {
 	return -1
 }
 
-// Try to match each compositional model against the current drone state.
-// For each model with N parts, we need each part to be the winner_obj of at
-// least one converged drone. Then we check that the world positions of the
-// matched parts have offsets matching the model's part offsets (within tol).
+// Try to match each compositional model against the higher LM's persistent
+// memory (parts_seen). For each model with N parts, we need each part to be
+// flagged as seen at some point. We then check that the world positions of
+// the matched parts have offsets matching the model's part offsets within
+// COMP_MATCH_TOL. Since the world objects don't move, "world position" is
+// just game.world.objects[wi].pos.
 @(private = "file")
 fleet_check_compositions :: proc(game: ^Game_State) {
 	for mi in 0..<len(fleet_comp_models) {
@@ -184,31 +191,16 @@ fleet_check_compositions :: proc(game: ^Game_State) {
 		if l8.identified_comps[mi] do continue
 		if len(model.parts) < 2     do continue
 
-		// For each part, find a drone whose converged LM matches that part.
-		// Also gather the part's world position (the world object the drone
-		// is currently fixated on).
 		matched_pos: [4]Vec3
 		all_matched := true
 		for pi in 0..<len(model.parts) {
 			part := &model.parts[pi]
-			found := false
-			for di in 0..<FLEET_NUM_DRONES {
-				lm := &game.lms[di + 1]
-				if !lm.converged do continue
-				if lm.winner_obj < 0 do continue
-				if cstring(game.model_db.objects[lm.winner_obj].name) == part.part_name {
-					wobj_idx := fleet_find_world_obj(game, part.part_name)
-					if wobj_idx >= 0 {
-						matched_pos[pi] = game.world.objects[wobj_idx].pos
-						found = true
-						break
-					}
-				}
-			}
-			if !found {
+			wobj_idx := fleet_find_world_obj(game, part.part_name)
+			if wobj_idx < 0 || wobj_idx >= len(l8.parts_seen) || !l8.parts_seen[wobj_idx] {
 				all_matched = false
 				break
 			}
+			matched_pos[pi] = game.world.objects[wobj_idx].pos
 		}
 		if !all_matched do continue
 
@@ -267,12 +259,28 @@ l8_fleet_update :: proc(game: ^Game_State, dt: f32) {
 	if rl.IsKeyPressed(.ESCAPE) { popup_show(game, .Confirm_Leave_Level); return }
 	if rl.IsKeyPressed(.H)      { l8.show_help = !l8.show_help }
 	if rl.IsKeyPressed(.N) {
+		// Lower-level reset only — higher LM's parts_seen persists. Harvest
+		// any current convergences first so we don't lose the in-progress info.
+		for i in 0..<FLEET_NUM_DRONES {
+			lm := &game.lms[i + 1]
+			if lm.converged && lm.winner_obj >= 0 && lm.winner_obj < len(l8.parts_seen) {
+				l8.parts_seen[lm.winner_obj] = true
+			}
+			lm_init(lm, i + 1)
+			lm_start_inference(lm, &game.model_db)
+		}
+		l8.message       = "Drone LMs reset — higher LM keeps its part history."
+		l8.message_timer = 3
+	}
+	if rl.IsKeyPressed(.B) {
+		// Full higher-level reset: forget all parts AND restart drones.
+		for i in 0..<len(l8.parts_seen) do l8.parts_seen[i] = false
 		for i in 0..<FLEET_NUM_DRONES {
 			lm_init(&game.lms[i + 1], i + 1)
 			lm_start_inference(&game.lms[i + 1], &game.model_db)
 		}
-		l8.message       = "NEW EPISODE — all drone LMs reset."
-		l8.message_timer = 2
+		l8.message       = "BIG reset — higher LM history cleared."
+		l8.message_timer = 3
 	}
 
 	ship := &game.ship
@@ -304,9 +312,30 @@ l8_fleet_update :: proc(game: ^Game_State, dt: f32) {
 		}
 	}
 	if new_target != l8.current_target {
-		l8.current_target = new_target
+		// Harvest any currently-converged drones into parts_seen FIRST so
+		// the higher LM doesn't lose what they identified about the old target
 		for di in 0..<FLEET_NUM_DRONES {
+			lm := &game.lms[di + 1]
+			if lm.converged && lm.winner_obj >= 0 && lm.winner_obj < len(l8.parts_seen) {
+				l8.parts_seen[lm.winner_obj] = true
+			}
+		}
+		// Reset all lower LMs so they can scan the new target afresh
+		for di in 0..<FLEET_NUM_DRONES {
+			lm_init(&game.lms[di + 1], di + 1)
+			lm_start_inference(&game.lms[di + 1], &game.model_db)
 			game.ship.drones[di].target_wobj = new_target
+			game.ship.drones[di].probe_count = 0
+		}
+		l8.current_target = new_target
+	}
+
+	// Continuously harvest live convergences so a drone that converges
+	// while you stay near a target is remembered the moment it locks in
+	for di in 0..<FLEET_NUM_DRONES {
+		lm := &game.lms[di + 1]
+		if lm.converged && lm.winner_obj >= 0 && lm.winner_obj < len(l8.parts_seen) {
+			l8.parts_seen[lm.winner_obj] = true
 		}
 	}
 
@@ -345,19 +374,10 @@ l8_fleet_update :: proc(game: ^Game_State, dt: f32) {
 			}
 		}
 
-		// Lateral voting (all 3 drones share)
-		if lm.mlh_idx >= 0 {
-			vote, ok := lm_generate_vote(lm)
-			if ok {
-				for other in 0..<FLEET_NUM_DRONES {
-					if other == di do continue
-					other_lm := &game.lms[other + 1]
-					if other_lm.converged do continue
-					offset := game.ship.drones[other].pos - drone.pos
-					lm_receive_vote(other_lm, vote, offset, &game.model_db)
-				}
-			}
-		}
+		// (No lateral voting here — drones run independently. The lesson
+		// of Level 8 is hierarchy, not voting. Voting would kill
+		// non-matching hypotheses too aggressively when the player swings
+		// between target objects.)
 	}
 
 	// Higher-level check
@@ -566,16 +586,11 @@ l8_fleet_draw_ui :: proc(game: ^Game_State) {
 			part := &model.parts[pi]
 			py := my + 24 + i32(pi) * 16
 
-			// Has any drone converged on this part?
+			// Persisted higher-LM memory of this part
 			has_part := false
-			for di in 0..<FLEET_NUM_DRONES {
-				lm := &game.lms[di + 1]
-				if lm.converged && lm.winner_obj >= 0 &&
-				   lm.winner_obj < db.object_count &&
-				   cstring(db.objects[lm.winner_obj].name) == part.part_name {
-					has_part = true
-					break
-				}
+			wi := fleet_find_world_obj(game, part.part_name)
+			if wi >= 0 && wi < len(l8.parts_seen) {
+				has_part = l8.parts_seen[wi]
 			}
 			mark: cstring = has_part ? "✓" : "·"
 			mc: Color    = has_part ? Color{120, 255, 160, 230} : Color{140, 160, 180, 200}
@@ -600,7 +615,7 @@ l8_fleet_draw_ui :: proc(game: ^Game_State) {
 	}
 
 	if l8.show_help {
-		rl.DrawText("[WASD] Fly   [N] New episode (reset all LMs)   [H] Help   [ESC] Back",
+		rl.DrawText("[WASD] Fly   [N] Reset drones (keep higher memory)   [B] Big reset   [H] Help   [ESC] Back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 }
