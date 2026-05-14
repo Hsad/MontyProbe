@@ -18,6 +18,28 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 	select_anim_t += dt
 	if locked_flash > 0 do locked_flash -= dt
 
+	// Briefing overlay intercepts most keys
+	if briefing_is_open() {
+		if rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.D) || rl.IsKeyPressed(.BACKSPACE) {
+			briefing_close()
+			return
+		}
+		if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.SPACE) {
+			if game.levels[game.selected_level].unlocked {
+				briefing_close()
+				game_enter_level(game, game.selected_level)
+			} else {
+				locked_flash = 1.2
+			}
+		}
+		// Allow up/down to browse between briefings without closing
+		sel := int(game.selected_level)
+		if rl.IsKeyPressed(.DOWN) || rl.IsKeyPressed(.J) do sel = min(sel + 1, LEVEL_COUNT - 1)
+		if rl.IsKeyPressed(.UP)   || rl.IsKeyPressed(.K) do sel = max(sel - 1, 0)
+		game.selected_level = Level_ID(sel)
+		return
+	}
+
 	sel := int(game.selected_level)
 
 	if rl.IsKeyPressed(.DOWN) || rl.IsKeyPressed(.J) {
@@ -34,6 +56,10 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 		} else {
 			locked_flash = 1.2
 		}
+	}
+
+	if rl.IsKeyPressed(.D) {
+		briefing_toggle()
 	}
 
 	if rl.IsKeyPressed(.ESCAPE) {
@@ -141,6 +167,10 @@ level_select_draw :: proc(game: ^Game_State) {
 		rl.DrawText(selected_info.description, i32(preview_x), i32(desc_y) + 44, 18, Color{160, 180, 220, 220})
 	}
 
+	// [D] for briefing
+	rl.DrawText("press [D] for a full briefing", i32(preview_x),
+		i32(desc_y) + 86, 13, Color{120, 180, 255, 200})
+
 	// Locked state indicator
 	if !selected_info.unlocked {
 		flash_alpha: u8 = locked_flash > 0 ? u8(min(locked_flash, 1) * 255) : 100
@@ -157,7 +187,11 @@ level_select_draw :: proc(game: ^Game_State) {
 	}
 
 	// Controls hint
-	rl.DrawText("[UP/DOWN] Select   [ENTER] Launch   [R] Reset progress   [ESC] Quit", i32(sw / 2) - 285, i32(sh) - 30, 16, Color{80, 100, 140, 150})
+	rl.DrawText("[UP/DOWN] Select   [ENTER] Launch   [D] Briefing   [R] Reset progress   [ESC] Quit",
+		i32(sw / 2) - 330, i32(sh) - 30, 15, Color{80, 100, 140, 150})
+
+	// Briefing overlay (drawn last so it covers the selector)
+	briefing_draw(game)
 }
 
 draw_ship_schematic :: proc(game: ^Game_State, cx, cy: f32, t: f32) {

@@ -24,7 +24,8 @@ LEVEL_COUNT :: len(Level_ID)
 Level_Info :: struct {
 	name:        cstring,
 	sensor_name: cstring,
-	description: cstring,
+	description: cstring,   // rough overview shown in the menu side panel
+	detail:      cstring,   // full briefing shown by pressing [D]
 	unlocked:    bool,
 	completed:   bool,
 	vtable:      Level_Vtable,
@@ -88,6 +89,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Self-Motion",
 		sensor_name = "Gyroscope",
 		description = "Fly blind. Track your own displacement.\nYou know where you've been,\nbut not what's out there.",
+		detail      = briefing_motion,
 		unlocked    = true,
 		vtable      = l0_motion_vtable(),
 	}
@@ -95,6 +97,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Chemical Sensor",
 		sensor_name = "Chem Probe",
 		description = "Detect nearby objects by chemical\ngradient. Move to find the source.",
+		detail      = briefing_smell,
 		unlocked    = false,
 		vtable      = l1_smell_vtable(),
 	}
@@ -102,6 +105,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Photon Probe",
 		sensor_name = "Light Sensor",
 		description = "A directional brightness sensor.\nYour first feature-at-a-pose.",
+		detail      = briefing_light,
 		unlocked    = false,
 		vtable      = l2_light_vtable(),
 	}
@@ -109,6 +113,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Contact Scanner",
 		sensor_name = "Hull Probe",
 		description = "Touch surfaces. Feel normals and\ntexture. Build your first object graph.",
+		detail      = briefing_touch,
 		unlocked    = false,
 		vtable      = l2_touch_vtable(),
 	}
@@ -116,6 +121,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Drone Fleet",
 		sensor_name = "Drones",
 		description = "Launch drones. Each builds its own\nmodel. Watch them vote over radio.",
+		detail      = briefing_drones,
 		unlocked    = false,
 		vtable      = l4_drones_vtable(),
 	}
@@ -123,6 +129,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Laser Range",
 		sensor_name = "Rangefinder",
 		description = "Sense from afar. Where should\nyou look next? Curiosity-driven scan.",
+		detail      = briefing_range,
 		unlocked    = false,
 		vtable      = l5_range_vtable(),
 	}
@@ -130,6 +137,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Sensor Array",
 		sensor_name = "Optic Array",
 		description = "An array of sensors — your retina.\nA thousand columns, all voting.",
+		detail      = briefing_eye,
 		unlocked    = false,
 		vtable      = l6_eye_vtable(),
 	}
@@ -137,6 +145,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Echo Sonar",
 		sensor_name = "Sonar",
 		description = "Sound gives shape and material.\nDifferent modality, same protocol.",
+		detail      = briefing_sonar,
 		unlocked    = false,
 		vtable      = l7_sonar_vtable(),
 	}
@@ -144,6 +153,7 @@ game_init :: proc(game: ^Game_State) {
 		name        = "Composition",
 		sensor_name = "Fleet AI",
 		description = "Parts make wholes. Drones recognize\ncomponents, mothership assembles.",
+		detail      = briefing_fleet,
 		unlocked    = false,
 		vtable      = l8_fleet_vtable(),
 	}
