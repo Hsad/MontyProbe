@@ -63,12 +63,23 @@ Learning_Module :: struct {
     mlh_idx:      int,      // index of most-likely hypothesis
     converged:    bool,
     winner_obj:   int,      // object_idx of winner (-1 if none yet)
+    is_symmetric: bool,     // set if the object is locally symmetric
+
+    // Per-criterion convergence status (true when each test passes)
+    crit_evidence: bool,
+    crit_margin:   bool,
+    crit_pose:     bool,
 
     // Per-step debug info (same index as hypotheses)
     step_info:    [MAX_HYPOTHESES]Hyp_Step_Info,
     last_cmp:     CMP_Message,
     last_disp:    Vec3,
     step_count:   int,
+
+    // Symmetry detection: count consecutive steps with no pruning change
+    prev_active:        int,
+    stable_steps:       int,
+    sym_required_steps: int,
 
     // --- Learning state ---
     learn_buffer:  [MAX_GRAPH_NODES]Graph_Node,
@@ -81,6 +92,8 @@ Learning_Module :: struct {
     prune_fraction:    f32,  // prune hypotheses below (mlh_evidence * fraction)
     converge_min_evid: f32,  // MLH must exceed this before we declare a winner
     converge_gap:      f32,  // second-best must be this far below MLH evidence
+    path_sim_thresh:   f32,  // MLH-object hypothesis locations must cluster within this
+    pose_sim_thresh:   f32,  // ...and rotations must cluster within this (radians)
 }
 
 lm_init :: proc(lm: ^Learning_Module, id: int) {
@@ -94,6 +107,9 @@ lm_init :: proc(lm: ^Learning_Module, id: int) {
     lm.prune_fraction    = 0.65
     lm.converge_min_evid = 4.0
     lm.converge_gap      = 2.0
+    lm.path_sim_thresh   = 1.5          // meters in our coord system
+    lm.pose_sim_thresh   = 0.5          // radians (~28 degrees)
+    lm.sym_required_steps = 8           // steps of stable hypothesis count → symmetric
 }
 
 // ─── Learning ────────────────────────────────────────────────────────────────
@@ -148,12 +164,18 @@ lm_commit :: proc(lm: ^Learning_Module, db: ^Model_Database, name: cstring) -> i
 N_INIT_ROTS :: 8
 
 lm_start_inference :: proc(lm: ^Learning_Module, db: ^Model_Database) {
-    lm.mode       = .Inferring
-    lm.hyp_count  = 0
-    lm.mlh_idx    = -1
-    lm.converged  = false
-    lm.winner_obj = -1
-    lm.step_count = 0
+    lm.mode          = .Inferring
+    lm.hyp_count     = 0
+    lm.mlh_idx       = -1
+    lm.converged     = false
+    lm.winner_obj    = -1
+    lm.step_count    = 0
+    lm.is_symmetric  = false
+    lm.crit_evidence = false
+    lm.crit_margin   = false
+    lm.crit_pose     = false
+    lm.prev_active   = 0
+    lm.stable_steps  = 0
 
     rots := lm_init_rotations()
 
@@ -253,17 +275,54 @@ lm_step :: proc(lm: ^Learning_Module, cmp: CMP_Message, displacement: Vec3, db: 
         }
     }
 
+    // ── Symmetry detection — stable hypothesis count over time ─────────────
+    active_now := lm_active_count(lm)
+    if active_now == lm.prev_active {
+        lm.stable_steps += 1
+    } else {
+        lm.stable_steps = 0
+    }
+    lm.prev_active = active_now
+
     lm_check_convergence(lm, db)
 }
 
-// ── Convergence check ────────────────────────────────────────────────────────
+// Angle (in radians) between two rotation matrices.
+// rel = a^T * b is the relative rotation; its trace gives 1 + 2*cos(angle).
+rotation_angle_between :: proc(a, b: Mat3) -> f32 {
+    rel := linalg.transpose(a) * b
+    tr := rel[0,0] + rel[1,1] + rel[2,2]
+    cos_a := clamp((tr - 1) * 0.5, -1, 1)
+    return math.acos(cos_a)
+}
+
+// ── Convergence check (three Monty criteria + symmetry path) ────────────────
+//
+// 1. EVIDENCE — MLH evidence must exceed `converge_min_evid`
+// 2. MARGIN   — no other object's best hypothesis within `converge_gap` of MLH
+// 3. POSE     — all still-active hypotheses on the MLH's object must cluster
+//               within `path_sim_thresh` (location) and `pose_sim_thresh`
+//               (rotation, in radians)
+//
+// If 1+2 are met but 3 isn't, the LM stays "still working." If the active
+// hypothesis count is stable for `sym_required_steps`, we declare the object
+// LOCALLY SYMMETRIC and converge anyway (matching Monty's symmetry path).
+//
+// Per-criterion booleans (crit_evidence / crit_margin / crit_pose) are
+// exposed so HUDs can show what's holding things back.
 lm_check_convergence :: proc(lm: ^Learning_Module, db: ^Model_Database) {
+    lm.crit_evidence = false
+    lm.crit_margin   = false
+    lm.crit_pose     = false
+
     if lm.mlh_idx < 0 do return
-
     mlh := &lm.hypotheses[lm.mlh_idx]
-    if mlh.evidence < lm.converge_min_evid do return
 
-    // Find best evidence per object
+    // 1. EVIDENCE
+    if mlh.evidence < lm.converge_min_evid do return
+    lm.crit_evidence = true
+
+    // 2. MARGIN — best evidence per object
     best := [MAX_OBJECTS]f32{}
     for i in 0..<lm.hyp_count {
         h := &lm.hypotheses[i]
@@ -271,17 +330,48 @@ lm_check_convergence :: proc(lm: ^Learning_Module, db: ^Model_Database) {
             best[h.object_idx] = h.evidence
         }
     }
-
-    // Winner requires: no other object within converge_gap of MLH
+    margin_ok := true
     for obj_idx in 0..<db.object_count {
         if obj_idx == mlh.object_idx do continue
         if best[obj_idx] >= mlh.evidence - lm.converge_gap {
-            return // still ambiguous
+            margin_ok = false
+            break
+        }
+    }
+    if !margin_ok do return
+    lm.crit_margin = true
+
+    // 3. POSE UNIQUENESS — all surviving MLH-object hypotheses cluster
+    pose_unique := true
+    for i in 0..<lm.hyp_count {
+        h := &lm.hypotheses[i]
+        if !h.active do continue
+        if h.object_idx != mlh.object_idx do continue
+        if linalg.distance(h.location, mlh.location) > lm.path_sim_thresh {
+            pose_unique = false
+            break
+        }
+        if rotation_angle_between(h.rotation, mlh.rotation) > lm.pose_sim_thresh {
+            pose_unique = false
+            break
         }
     }
 
-    lm.converged  = true
-    lm.winner_obj = mlh.object_idx
+    if pose_unique {
+        lm.crit_pose  = true
+        lm.converged  = true
+        lm.winner_obj = mlh.object_idx
+        return
+    }
+
+    // SYMMETRY PATH: if pose hypotheses aren't being pruned anymore, the
+    // object is locally symmetric — declare convergence on identity even
+    // though the pose remains ambiguous.
+    if lm.stable_steps >= lm.sym_required_steps {
+        lm.is_symmetric = true
+        lm.converged    = true
+        lm.winner_obj   = mlh.object_idx
+    }
 }
 
 // ── Feature scoring ──────────────────────────────────────────────────────────

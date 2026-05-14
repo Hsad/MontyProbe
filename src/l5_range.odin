@@ -473,6 +473,10 @@ l5_range_draw_ui :: proc(game: ^Game_State) {
 		bars_y += 16
 	}
 
+	// Convergence checklist — the three Monty criteria + symmetry
+	bars_y += 14
+	lm_draw_convergence_checklist(lm, 10, i32(bars_y))
+
 	// Message overlay
 	if l5.message_timer > 0 && l5.message != nil {
 		alpha := u8(min(l5.message_timer * 1.5, 1) * 255)

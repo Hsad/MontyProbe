@@ -515,10 +515,13 @@ l2_draw_ui :: proc(game: ^Game_State) {
 				rl.DrawText(fmt.ctprintf("  morph: %+.2f  feat: %.2f  Δ: %+.2f",
 					info.morphology_score, info.feature_score, info.delta),
 					i32(panel_x) + 8, i32(y), 13, Color{180, 200, 220, 200})
+				y += 20
 			} else {
 				rl.DrawText("  no match — penalised", i32(panel_x) + 8, i32(y), 13,
 					Color{220, 120, 80, 200})
+				y += 20
 			}
+			lm_draw_convergence_checklist(lm, i32(panel_x) + 8, i32(y))
 		}
 	}
 

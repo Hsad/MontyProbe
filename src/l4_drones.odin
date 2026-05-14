@@ -532,6 +532,9 @@ l4_draw_ui :: proc(game: ^Game_State) {
 				i32(panel_x) + 220, i32(row_y), 11, Color{200, 210, 230, 200})
 		}
 
+		// Inline convergence checklist (E / M / P)
+		lm_draw_convergence_inline(lm, i32(panel_x) + 10, i32(py + panel_h - 46))
+
 		// Status
 		status_y := py + panel_h - 24
 		if lm.converged && lm.winner_obj >= 0 {
