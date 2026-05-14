@@ -14,9 +14,14 @@ HACK_FONT_DATA :: #load("../assets/fonts/Hack-Regular.ttf")
 g_font: rl.Font
 
 main :: proc() {
-	rl.SetConfigFlags({.WINDOW_RESIZABLE, .VSYNC_HINT})
+	rl.SetConfigFlags({.WINDOW_RESIZABLE, .VSYNC_HINT, .WINDOW_HIGHDPI})
 	rl.InitWindow(SCREEN_W, SCREEN_H, TITLE)
 	defer rl.CloseWindow()
+
+	// Some compositors (notably Wayland) report a stale initial framebuffer
+	// size until a resize event fires. Manually setting the window size
+	// kicks GLFW into recomputing the framebuffer correctly.
+	rl.SetWindowSize(SCREEN_W, SCREEN_H)
 
 	rl.SetTargetFPS(60)
 

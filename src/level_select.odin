@@ -32,11 +32,17 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 				locked_flash = 1.2
 			}
 		}
-		// Allow up/down to browse between briefings without closing
+		// LEFT/RIGHT navigates between levels (resets scroll on change)
 		sel := int(game.selected_level)
-		if rl.IsKeyPressed(.DOWN) || rl.IsKeyPressed(.J) do sel = min(sel + 1, LEVEL_COUNT - 1)
-		if rl.IsKeyPressed(.UP)   || rl.IsKeyPressed(.K) do sel = max(sel - 1, 0)
-		game.selected_level = Level_ID(sel)
+		old_sel := sel
+		if rl.IsKeyPressed(.RIGHT) || rl.IsKeyPressed(.L) do sel = min(sel + 1, LEVEL_COUNT - 1)
+		if rl.IsKeyPressed(.LEFT)  || rl.IsKeyPressed(.H) do sel = max(sel - 1, 0)
+		if sel != old_sel {
+			game.selected_level = Level_ID(sel)
+			briefing_on_level_change()
+		}
+		// UP/DOWN scrolls the content
+		briefing_handle_scroll(dt)
 		return
 	}
 

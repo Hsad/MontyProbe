@@ -200,9 +200,47 @@ you can accumulate parts across many fly-by passes.`)
 @(private = "file")
 briefing_open := false
 
+@(private = "file")
+briefing_scroll_y: f32 = 0       // current scroll offset within the content region
+
+@(private = "file")
+briefing_content_height: f32 = 0 // last-frame total height of rendered detail (for clamping)
+
 briefing_is_open :: proc() -> bool { return briefing_open }
-briefing_toggle  :: proc() { briefing_open = !briefing_open }
+briefing_toggle  :: proc() {
+	briefing_open    = !briefing_open
+	briefing_scroll_y = 0
+}
 briefing_close   :: proc() { briefing_open = false }
+
+// Reset scroll when switching to a different level's briefing
+briefing_on_level_change :: proc() {
+	briefing_scroll_y = 0
+}
+
+// Scroll input — call each frame from the level select while open
+briefing_handle_scroll :: proc(dt: f32) {
+	speed: f32 = 600.0
+	if rl.IsKeyDown(.UP) || rl.IsKeyDown(.K) {
+		briefing_scroll_y -= speed * dt
+	}
+	if rl.IsKeyDown(.DOWN) || rl.IsKeyDown(.J) {
+		briefing_scroll_y += speed * dt
+	}
+	if rl.IsKeyPressed(.PAGE_UP)   do briefing_scroll_y -= 240
+	if rl.IsKeyPressed(.PAGE_DOWN) do briefing_scroll_y += 240
+	if rl.IsKeyPressed(.HOME)      do briefing_scroll_y = 0
+
+	// Mouse wheel
+	wheel := rl.GetMouseWheelMove()
+	if wheel != 0 do briefing_scroll_y -= wheel * 60
+
+	// Clamp at the end using last-frame's measured content height
+	max_scroll := briefing_content_height
+	if max_scroll < 0 do max_scroll = 0
+	if briefing_scroll_y < 0 do briefing_scroll_y = 0
+	if briefing_scroll_y > max_scroll do briefing_scroll_y = max_scroll
+}
 
 // Helper — draw text in the loaded Hack font at a given size and colour.
 @(private = "file")
@@ -225,9 +263,9 @@ briefing_draw :: proc(game: ^Game_State) {
 	// Dim the menu underneath
 	rl.DrawRectangle(0, 0, i32(sw), i32(sh), Color{0, 0, 0, 210})
 
-	// Panel — wider and taller to accommodate larger fonts
-	pw: f32 = min(sw - 40, 1100)
-	ph: f32 = min(sh - 40, 760)
+	// Panel — wider to give more horizontal room for the prose
+	pw: f32 = min(sw - 40, 1300)
+	ph: f32 = min(sh - 40, sh - 40)
 	px := (sw - pw) / 2
 	py := (sh - ph) / 2
 	rl.DrawRectangleRounded({px, py, pw, ph}, 0.02, 8, Color{15, 20, 30, 250})
@@ -254,36 +292,78 @@ briefing_draw :: proc(game: ^Game_State) {
 	rl.DrawLine(i32(px) + 28, i32(py) + 110, i32(px + pw) - 28, i32(py) + 110,
 		Color{60, 80, 120, 150})
 
-	// Overview — section label uses raylib default font; body uses Hack
-	rl.DrawText("OVERVIEW", i32(px) + 28, i32(py) + 124, 18, Color{120, 180, 255, 200})
+	// ── Scrollable content region ───────────────────────────────────────
+	content_top   := i32(py) + 124
+	content_bot   := i32(py + ph) - 60   // leave room for footer
+	content_h     := content_bot - content_top
+	content_left  := i32(px) + 28
+	content_w     := i32(pw) - 56 - 14    // leave 14px for scrollbar gutter
+
+	rl.BeginScissorMode(content_left, content_top, content_w + 14, content_h)
+
+	cy := content_top - i32(briefing_scroll_y)
+
+	// Overview — section label (raylib default font) then body (Hack)
+	rl.DrawText("OVERVIEW", content_left, cy, 18, Color{120, 180, 255, 200})
+	cy += 26
 	if info.description != nil {
-		draw(info.description, i32(px) + 28, i32(py) + 148, 21,
-			Color{220, 230, 240, 230})
+		draw(info.description, content_left, cy, 21, Color{220, 230, 240, 230})
+		// Count lines in description to advance cy
+		dbody := ([^]u8)(info.description)
+		di := 0
+		desc_lines := 1
+		for dbody[di] != 0 {
+			if dbody[di] == '\n' do desc_lines += 1
+			di += 1
+		}
+		cy += i32(desc_lines * 28) + 18
 	}
 
-	// Detail
+	// Detail prose
 	if info.detail != nil {
-		detail_y := i32(py) + 250
-		briefing_draw_detail(info.detail, i32(px) + 28, detail_y, i32(pw) - 56)
+		cy = briefing_draw_detail(info.detail, content_left, cy)
 	}
 
-	// Footer
+	rl.EndScissorMode()
+
+	// Compute total content height for scrollbar / clamp
+	content_total := f32(cy - (content_top - i32(briefing_scroll_y)))
+	max_scroll := content_total - f32(content_h)
+	if max_scroll < 0 do max_scroll = 0
+	briefing_content_height = max_scroll
+
+	// Scrollbar on the right edge of the content area
+	if max_scroll > 0 {
+		track_x := content_left + content_w + 4
+		track_y := content_top
+		track_w: i32 = 6
+		track_h := content_h
+		rl.DrawRectangle(track_x, track_y, track_w, track_h, Color{40, 50, 70, 160})
+
+		thumb_frac := f32(content_h) / content_total
+		thumb_h := i32(thumb_frac * f32(track_h))
+		if thumb_h < 20 do thumb_h = 20
+		thumb_pos_frac := briefing_scroll_y / max_scroll
+		thumb_y := track_y + i32(thumb_pos_frac * f32(track_h - thumb_h))
+		rl.DrawRectangle(track_x, thumb_y, track_w, thumb_h, Color{120, 180, 255, 220})
+	}
+
+	// Footer hint
 	hint_y := i32(py + ph) - 44
 	rl.DrawLine(i32(px) + 28, hint_y - 10, i32(px + pw) - 28, hint_y - 10,
 		Color{60, 80, 120, 150})
-	if info.unlocked {
-		draw("[ENTER] launch level   [D]/[ESC] back to map",
-			i32(px) + 28, hint_y, 18, Color{180, 200, 220, 220})
-	} else {
-		draw("Complete previous levels to unlock — [D]/[ESC] back to map",
-			i32(px) + 28, hint_y, 18, Color{180, 180, 200, 200})
+	footer: cstring = "[LEFT/RIGHT] level   [UP/DOWN] scroll   [ENTER] launch   [D]/[ESC] back"
+	if !info.unlocked {
+		footer = "[LEFT/RIGHT] level   [UP/DOWN] scroll   [D]/[ESC] back   (locked)"
 	}
+	draw(footer, i32(px) + 28, hint_y, 17, Color{180, 200, 220, 220})
 }
 
 // Render the detail string with coloured section headers. Sections are
 // identified by known all-caps single-line headers; everything else is body.
+// Returns the final y cursor — caller uses this to know total content height.
 @(private = "file")
-briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
+briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 	body_size:   f32 = 19
 	header_size: f32 = 20
 	line_h:      i32 = 24
@@ -340,4 +420,5 @@ briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
 		if body[i] == 0 do break
 		i += 1
 	}
+	return cy
 }
