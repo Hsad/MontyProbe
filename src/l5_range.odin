@@ -72,8 +72,8 @@ l5_range_init :: proc(game: ^Game_State) {
 	l5 = {}
 	l5.current_wobj  = -1
 	l5.show_help     = true
-	l5.message       = "Laser rangefinder online. [F] to pulse, [N] for new episode.\nThe LM keeps accumulating across every pulse — if you swing\nto another object, you'll see evidence rebalance live."
-	l5.message_timer = 9
+	l5.message       = "Laser rangefinder online. [F] to pulse.\nWatch for the CYAN BEACON in the world — that's the model-based\naction policy telling you where the next probe would best\ndisambiguate its top two guesses. Aim there to win faster."
+	l5.message_timer = 10
 
 	game.ship.pos     = {0, 0, -8}
 	game.ship.heading = 0
@@ -274,7 +274,6 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 		idx, hit, normal, _ := l5_raycast(&game.world, ship.pos, fwd)
 		if idx >= 0 {
 			l5_register_pulse(game, idx, hit, normal, prev_pos)
-			l5_recompute_hint(game)
 		} else {
 			l5.last_cmp_valid = false
 			l5.message       = "Laser missed — empty space."
@@ -282,6 +281,9 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 		}
 		l5.cooldown = LASER_COOLDOWN
 	}
+
+	// Recompute curiosity hint every frame so it's always live
+	l5_recompute_hint(game)
 
 	// Check for convergence — record the winner if it's a new identification
 	lm := &game.lms[0]
@@ -346,15 +348,35 @@ l5_range_draw :: proc(game: ^Game_State) {
 		rl.DrawSphereWires(obj.pos, obj.size.x + 0.3, 10, 10, Color{120, 255, 160, 180})
 	}
 
-	// Curiosity hint — pulsing sphere at the "best next probe" location
+	// Curiosity hint — vertical beacon + large pulsing sphere
 	if l5.hint_valid && !l5.completed {
 		t := f32(rl.GetTime())
 		pulse := 0.5 + 0.5 * math.sin(t * 4)
-		r := 0.5 + 0.2 * pulse
-		rl.DrawSphereWires(l5.hint_pos, r, 8, 8, Color{120, 220, 255, u8(180 + pulse * 60)})
-		rl.DrawSphere(l5.hint_pos, 0.12, Color{120, 220, 255, 220})
-		// thin line from ship toward hint
-		rl.DrawLine3D(game.ship.pos, l5.hint_pos, Color{120, 220, 255, 80})
+		r := 1.2 + 0.4 * pulse
+		c := Color{120, 220, 255, 255}
+
+		// Vertical beacon — pillar of cyan light from ground to high up,
+		// extremely visible from any angle
+		beacon_bot := l5.hint_pos + Vec3{0, -2, 0}
+		beacon_top := l5.hint_pos + Vec3{0, 8, 0}
+		rl.DrawCylinderEx(beacon_bot, beacon_top, 0.06, 0.06, 6,
+			Color{c.r, c.g, c.b, u8(140 + pulse * 60)})
+
+		// Large wireframe sphere — the actual hint position
+		rl.DrawSphereWires(l5.hint_pos, r, 10, 10, Color{c.r, c.g, c.b, u8(160 + pulse * 80)})
+		rl.DrawSphere(l5.hint_pos, 0.25, c)
+
+		// Inner pulsing glow
+		rl.DrawSphere(l5.hint_pos, r * 0.4, Color{c.r, c.g, c.b, u8(pulse * 80)})
+
+		// Bright thick line from ship to hint
+		rl.DrawLine3D(game.ship.pos, l5.hint_pos, Color{c.r, c.g, c.b, 180})
+
+		// Floating label above the beacon
+		label_pos := l5.hint_pos + Vec3{0, 9, 0}
+		screen := rl.GetWorldToScreen(label_pos, game.camera)
+		// (label rendered in 2D UI pass to keep crisp text — handled in draw_ui via l5.hint_pos)
+		_ = screen
 	}
 
 	rl.EndMode3D()
@@ -367,6 +389,59 @@ l5_range_draw_ui :: proc(game: ^Game_State) {
 	sh := f32(rl.GetScreenHeight())
 	lm := &game.lms[0]
 	db := &game.model_db
+
+	// ── Curiosity hint screen-space label + off-screen arrow ──────────────
+	if l5.hint_valid && !l5.completed {
+		label_world := l5.hint_pos + Vec3{0, 8.5, 0}
+		screen := rl.GetWorldToScreen(label_world, game.camera)
+		on_screen := screen.x >= 0 && screen.x < sw && screen.y >= 0 && screen.y < sh
+
+		if on_screen {
+			// 3D-anchored "AIM HERE" label
+			label: cstring = "AIM HERE — best next probe"
+			tw := rl.MeasureText(label, 16)
+			lx := i32(screen.x) - tw / 2
+			ly := i32(screen.y)
+			rl.DrawRectangle(lx - 8, ly - 4, tw + 16, 22, Color{0, 20, 40, 220})
+			rl.DrawRectangleLines(lx - 8, ly - 4, tw + 16, 22, Color{120, 220, 255, 220})
+			rl.DrawText(label, lx, ly, 16, Color{180, 240, 255, 240})
+
+			// Beneath: the rationale
+			if l5.hint_obj_a >= 0 && l5.hint_obj_b >= 0 {
+				sub := fmt.ctprintf("%s vs. %s",
+					db.objects[l5.hint_obj_a].name, db.objects[l5.hint_obj_b].name)
+				stw := rl.MeasureText(sub, 13)
+				sx := i32(screen.x) - stw / 2
+				sy := ly + 24
+				rl.DrawText(sub, sx + 1, sy + 1, 13, Color{0, 0, 0, 200})
+				rl.DrawText(sub, sx, sy, 13, Color{255, 220, 100, 220})
+			}
+		} else {
+			// Off-screen: edge-of-screen arrow pointing toward hint
+			cx, cy := sw * 0.5, sh * 0.5
+			dx, dy := screen.x - cx, screen.y - cy
+			// Behind camera fix
+			cam_fwd := linalg.normalize(game.camera.target - game.camera.position)
+			to_hint := l5.hint_pos - game.camera.position
+			if linalg.dot(to_hint, cam_fwd) < 0 {
+				dy = sh * 0.5  // force it to the bottom edge
+			}
+			// scale to screen edge
+			scale: f32 = 1
+			if abs(dx) * (sh - 80) > abs(dy) * (sw - 80) {
+				scale = (sw * 0.5 - 60) / max(abs(dx), 0.001)
+			} else {
+				scale = (sh * 0.5 - 60) / max(abs(dy), 0.001)
+			}
+			ax := cx + dx * scale
+			ay := cy + dy * scale
+			t := f32(rl.GetTime())
+			pulse := 0.5 + 0.5 * math.sin(t * 4)
+			rl.DrawCircle(i32(ax), i32(ay), 18 + pulse * 6, Color{120, 220, 255, 200})
+			rl.DrawCircleLines(i32(ax), i32(ay), 18, Color{180, 240, 255, 240})
+			rl.DrawText("HINT", i32(ax) - 18, i32(ay) - 7, 14, Color{20, 30, 50, 240})
+		}
+	}
 
 	// Top-left: status panel
 	pw, ph: f32 = 300, 130
@@ -429,9 +504,9 @@ l5_range_draw_ui :: proc(game: ^Game_State) {
 	rl.DrawText("CURIOSITY (model-based action policy)", i32(right_x) + 10, hint_y, 13,
 		Color{120, 220, 255, 220})
 	if l5.hint_valid && !l5.completed {
-		rl.DrawText("  Aim at the cyan sphere — it will best", i32(right_x) + 10, hint_y + 18, 13,
-			Color{200, 230, 255, 220})
-		rl.DrawText("  separate the top two candidates:", i32(right_x) + 10, hint_y + 34, 13,
+		rl.DrawText("  → Cyan beacon in the world: aim there.", i32(right_x) + 10, hint_y + 18, 13,
+			Color{180, 240, 255, 240})
+		rl.DrawText("  Predicted to best separate:", i32(right_x) + 10, hint_y + 34, 13,
 			Color{200, 230, 255, 220})
 		if l5.hint_obj_a >= 0 && l5.hint_obj_b >= 0 {
 			rl.DrawText(fmt.ctprintf("    %s  vs.  %s",
