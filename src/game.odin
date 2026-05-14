@@ -131,6 +131,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Optic Array",
 		description = "An array of sensors — your retina.\nA thousand columns, all voting.",
 		unlocked    = false,
+		vtable      = l6_eye_vtable(),
 	}
 	game.levels[Level_ID.Sonar] = {
 		name        = "Echo Sonar",
