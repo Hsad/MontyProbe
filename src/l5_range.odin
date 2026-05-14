@@ -146,22 +146,28 @@ l5_register_pulse :: proc(game: ^Game_State, wobj_idx: int, hit, normal: Vec3, p
 	l5.probes_current += 1
 }
 
-// Compute the curiosity hint: world-space position where a pulse would best
-// distinguish the top two candidate objects.
+// Compute the curiosity hint: the world-space surface point on the leading
+// candidate object where features differ most from the runner-up — i.e. the
+// spot a probe would most efficiently disambiguate.
 //
-// Approach: take the top-2 active hypotheses (with different object_idx).
-// For each graph node on object A, project it into world space using A's
-// pose. Translate that world location into B's object frame via B's pose.
-// Find the nearest node on B at that location. Compare features. The
-// node with maximum predicted dissimilarity is the most discriminating
-// place to look next.
+// Simplified vs full Monty: in real Monty the policy considers the LM's
+// pose belief and proposes an action (movement) that maximizes info gain.
+// Here we use the fact that the world objects are static at their default
+// orientation, so the surface points on object A's graph map directly to
+// world space via `world.pos + node.location`. The disambiguation score is
+// feature-only: how different is A's surface here vs B's nearest point?
 @(private = "file")
 l5_recompute_hint :: proc(game: ^Game_State) {
 	l5.hint_valid = false
 	lm := &game.lms[0]
 	db := &game.model_db
-	if lm.mode != .Inferring || lm.converged do return
-	if lm.hyp_count == 0 do return
+
+	// No hint before any observation — all hypotheses have evidence 0 and
+	// any "top-2" pick would be arbitrary.
+	if lm.step_count == 0    do return
+	if lm.mode != .Inferring do return
+	if lm.converged          do return
+	if lm.hyp_count == 0     do return
 
 	// Best hypothesis per object
 	best_idx := [MAX_OBJECTS]int{}
@@ -176,7 +182,7 @@ l5_recompute_hint :: proc(game: ^Game_State) {
 		}
 	}
 
-	// Top two different objects
+	// Top two DIFFERENT objects
 	top_a, top_b := -1, -1
 	top_a_e: f32 = -99999
 	top_b_e: f32 = -99999
@@ -186,34 +192,22 @@ l5_recompute_hint :: proc(game: ^Game_State) {
 		if e > top_a_e { top_b = top_a; top_b_e = top_a_e; top_a = oi; top_a_e = e }
 		else if e > top_b_e { top_b = oi; top_b_e = e }
 	}
+	// Only one candidate object left — no disambiguation needed, no hint.
 	if top_a < 0 || top_b < 0 do return
 
-	hyp_a := &lm.hypotheses[best_idx[top_a]]
-	hyp_b := &lm.hypotheses[best_idx[top_b]]
 	obj_a := &db.objects[top_a]
 	obj_b := &db.objects[top_b]
 
+	// Find the node on A whose features differ most from B's nearest point
+	// at the same model-frame location.
 	best_score: f32 = -1
-	best_world_pos := Vec3{0, 0, 0}
-
+	best_node  := -1
 	for ni in 0..<obj_a.node_count {
 		node_a := &obj_a.nodes[ni]
-		// A's object frame → body frame
-		disp_obj_a := node_a.location - hyp_a.location
-		disp_body  := hyp_a.rotation * disp_obj_a
-		// Anchor world location near the actual world object so the hint
-		// appears on a visible body, not on a phantom
-		world_pos  := game.world.objects[top_a].pos + disp_body
-
-		// Same body delta in B's object frame
-		node_b_loc := hyp_b.location + linalg.transpose(hyp_b.rotation) * disp_body
-
-		// Nearest stored node on B at that location
-		nb_idx, _ := model_nearest_node(obj_b, node_b_loc, 2.0)
+		nb_idx, _ := model_nearest_node(obj_b, node_a.location, 2.5)
 		score: f32
-
 		if nb_idx < 0 {
-			// B doesn't have geometry there — strong discriminator
+			// B has no geometry at this position — strong discriminator
 			score = 1.0
 		} else {
 			nb := &obj_b.nodes[nb_idx]
@@ -222,20 +216,42 @@ l5_recompute_hint :: proc(game: ^Game_State) {
 			temp_d  := abs(node_a.features.temperature - nb.features.temperature)
 			score = color_d * 1.5 + rough_d + temp_d
 		}
-
 		if score > best_score {
 			best_score = score
-			best_world_pos = world_pos
+			best_node  = ni
 		}
 	}
 
-	if best_score > 0.05 {
-		l5.hint_valid = true
-		l5.hint_pos   = best_world_pos
-		l5.hint_obj_a = top_a
-		l5.hint_obj_b = top_b
-		l5.hint_score = best_score
+	if best_node < 0 || best_score < 0.05 do return
+
+	// Hint lives at the SURFACE point in world space on object A
+	// (objects are static at default orientation, so this is direct)
+	node := &obj_a.nodes[best_node]
+	l5.hint_pos   = game.world.objects[top_a].pos + node.location
+	l5.hint_valid = true
+	l5.hint_obj_a = top_a
+	l5.hint_obj_b = top_b
+	l5.hint_score = best_score
+}
+
+// Returns true if hypothesis space has collapsed to a single object — useful
+// for HUD messaging ("keep probing the leader to confirm")
+@(private = "file")
+l5_single_candidate :: proc(game: ^Game_State) -> bool {
+	lm := &game.lms[0]
+	if lm.step_count == 0 do return false
+	seen := [MAX_OBJECTS]bool{}
+	count := 0
+	for i in 0..<lm.hyp_count {
+		h := &lm.hypotheses[i]
+		if !h.active do continue
+		if !seen[h.object_idx] {
+			seen[h.object_idx] = true
+			count += 1
+			if count > 1 do return false
+		}
 	}
+	return count == 1
 }
 
 l5_range_update :: proc(game: ^Game_State, dt: f32) {
@@ -518,6 +534,16 @@ l5_range_draw_ui :: proc(game: ^Game_State) {
 	} else if lm.converged {
 		rl.DrawText("  Converged — no hint needed.", i32(right_x) + 10, hint_y + 18, 13,
 			Color{160, 220, 180, 200})
+	} else if l5_single_candidate(game) {
+		rl.DrawText("  Only one candidate left.", i32(right_x) + 10, hint_y + 18, 13,
+			Color{255, 220, 100, 220})
+		rl.DrawText("  Keep probing it to confirm pose.", i32(right_x) + 10, hint_y + 34, 13,
+			Color{200, 220, 240, 200})
+	} else if lm.step_count == 0 {
+		rl.DrawText("  Take a probe to start —", i32(right_x) + 10, hint_y + 18, 13,
+			Color{160, 180, 200, 200})
+		rl.DrawText("  hint appears once there's evidence to compare.",
+			i32(right_x) + 10, hint_y + 34, 13, Color{160, 180, 200, 200})
 	} else {
 		rl.DrawText("  (collecting evidence...)", i32(right_x) + 10, hint_y + 18, 13,
 			Color{160, 180, 200, 180})
