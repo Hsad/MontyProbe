@@ -388,7 +388,7 @@ briefing_draw :: proc(game: ^Game_State) {
 // Render the detail string with coloured section headers. Sections are
 // identified by known all-caps single-line headers; everything else is body.
 // Returns the final y cursor — caller uses this to know total content height.
-@(private = "file")
+// Package-visible so the About overlay (about.odin) can reuse it.
 briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 	body_size:   f32 = 19
 	header_size: f32 = 20
@@ -402,7 +402,9 @@ briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 
 	is_header :: proc(line: cstring) -> bool {
 		switch line {
-		case "WHAT'S HAPPENING", "THE MONTY CONCEPT", "WATCH FOR":
+		case "WHAT'S HAPPENING", "THE MONTY CONCEPT", "WATCH FOR",
+		     "THE PROJECT", "WHAT'S FAITHFUL", "WHAT'S SIMPLIFIED",
+		     "WHY THE DIFFERENCES", "REAL MONTY POINTERS":
 			return true
 		}
 		return false
@@ -427,9 +429,14 @@ briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 			cy += 8
 			c := Color{120, 220, 255, 230}
 			switch line_cstr {
-			case "WHAT'S HAPPENING":  c = Color{255, 220, 100, 230}
-			case "THE MONTY CONCEPT": c = Color{120, 220, 160, 230}
-			case "WATCH FOR":         c = Color{220, 160, 255, 230}
+			case "WHAT'S HAPPENING":     c = Color{255, 220, 100, 230}
+			case "THE MONTY CONCEPT":    c = Color{120, 220, 160, 230}
+			case "WATCH FOR":            c = Color{220, 160, 255, 230}
+			case "THE PROJECT":          c = Color{120, 180, 255, 230}
+			case "WHAT'S FAITHFUL":      c = Color{120, 255, 160, 230}
+			case "WHAT'S SIMPLIFIED":    c = Color{255, 200, 100, 230}
+			case "WHY THE DIFFERENCES":  c = Color{180, 200, 240, 230}
+			case "REAL MONTY POINTERS":  c = Color{120, 220, 255, 230}
 			}
 			// Headers use raylib's default font for visual contrast
 			rl.DrawText(line_cstr, x, cy, i32(header_size), c)

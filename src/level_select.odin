@@ -18,6 +18,16 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 	select_anim_t += dt
 	if locked_flash > 0 do locked_flash -= dt
 
+	// About page intercepts all keys
+	if about_is_open() {
+		if rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.I) || rl.IsKeyPressed(.BACKSPACE) {
+			about_close()
+			return
+		}
+		about_handle_scroll(dt)
+		return
+	}
+
 	// Briefing overlay intercepts most keys
 	if briefing_is_open() {
 		if rl.IsKeyPressed(.ESCAPE) || rl.IsKeyPressed(.D) || rl.IsKeyPressed(.BACKSPACE) {
@@ -66,6 +76,10 @@ level_select_update :: proc(game: ^Game_State, dt: f32) {
 
 	if rl.IsKeyPressed(.D) {
 		briefing_toggle()
+	}
+
+	if rl.IsKeyPressed(.I) {
+		about_toggle()
 	}
 
 	if rl.IsKeyPressed(.ESCAPE) {
@@ -193,11 +207,15 @@ level_select_draw :: proc(game: ^Game_State) {
 	}
 
 	// Controls hint
-	rl.DrawText("[UP/DOWN] Select   [ENTER] Launch   [D] Briefing   [R] Reset progress   [ESC] Quit",
-		i32(sw / 2) - 330, i32(sh) - 30, 15, Color{80, 100, 140, 150})
+	rl.DrawText("[UP/DOWN] Select  [ENTER] Launch  [D] Briefing  [I] About  [R] Reset  [ESC] Quit",
+		i32(sw / 2) - 360, i32(sh) - 30, 15, Color{80, 100, 140, 150})
 
 	// Briefing overlay (drawn last so it covers the selector)
 	briefing_draw(game)
+	// About overlay drawn after briefing — opening either while the other is
+	// open isn't allowed by the input handler, but order matters if both were
+	// somehow active
+	about_draw()
 }
 
 draw_ship_schematic :: proc(game: ^Game_State, cx, cy: f32, t: f32) {
