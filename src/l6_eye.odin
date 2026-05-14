@@ -424,23 +424,23 @@ l6_eye_draw_ui :: proc(game: ^Game_State) {
 		i32(sdr_x) + 10, i32(sdr_y) + 26, 11, Color{140, 160, 190, 180})
 
 	// Build the union: for each (object, rotation_bucket), how many LMs have
-	// an active hypothesis there
+	// at least one active hypothesis there. Fixed-size stack buffers — no
+	// allocator needed.
 	n_rot := N_INIT_ROTS
-	union_grid := make([dynamic]int, db.object_count * n_rot, allocator = context.temp_allocator)
-	defer delete(union_grid)
+	SDR_MAX :: MAX_OBJECTS * N_INIT_ROTS  // upper bound, 32 * 8 = 256
+	sdr_size := db.object_count * n_rot
+
+	union_grid: [SDR_MAX]int
 
 	for lm_i in 0..<NUM_SM_CELLS {
 		lm := &game.lms[lm_i]
-		// Per-LM, mark which (obj, rot) buckets have at least one active hyp
-		seen := make([]bool, db.object_count * n_rot, allocator = context.temp_allocator)
-		defer delete(seen)
+		seen: [SDR_MAX]bool
 		for hi in 0..<lm.hyp_count {
 			h := &lm.hypotheses[hi]
 			if !h.active do continue
-			// Rotation bucket — derived from index since we seeded N_INIT_ROTS per node
-			rot_b := hi % n_rot
+			rot_b := hi % n_rot   // rotation bucket — N_INIT_ROTS seeded per node
 			cell  := h.object_idx * n_rot + rot_b
-			if cell >= 0 && cell < len(seen) && !seen[cell] {
+			if cell >= 0 && cell < sdr_size && !seen[cell] {
 				seen[cell] = true
 				union_grid[cell] += 1
 			}
@@ -478,8 +478,8 @@ l6_eye_draw_ui :: proc(game: ^Game_State) {
 
 	// SDR stats
 	total_active := 0
-	for v in union_grid do total_active += v > 0 ? 1 : 0
-	max_cells := db.object_count * n_rot
+	for i in 0..<sdr_size do total_active += union_grid[i] > 0 ? 1 : 0
+	max_cells := sdr_size
 	stats_y := i32(sdr_y) + i32(sdr_h) - 30
 	rl.DrawText(fmt.ctprintf("Union sparsity: %d / %d cells lit  (%.0f%%)",
 			total_active, max_cells, 100 * f32(total_active) / f32(max_cells)),
