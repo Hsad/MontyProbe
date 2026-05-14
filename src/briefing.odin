@@ -184,6 +184,12 @@ Crystal Spire, Lava Rock, Methane Pocket, Metal Debris), each distinct
 on every feature dimension. Press [TAB] to toggle between single-laser
 and 9-cell optic-array modes. [N] resets the LMs for a fresh episode.
 
+The sandbox auto-resets the LM when observations strongly contradict
+the current MLH for several pulses in a row — so after you've
+identified one object, you can fly to another and the LM will notice
+"this isn't what I thought" and start over by itself. Watch the
+"confusion streak" counter in the LM 0 deep view.
+
 THE MONTY CONCEPT
 This is free play — every concept from every prior level applies. The
 same algorithm scales: a single LM does fine on simple objects but the
@@ -194,12 +200,19 @@ objects spawn within view radius, get culled past it. The procedural
 hash means the world is large but reproducible — same coords, same
 content.
 
+In real Monty, episode boundaries are usually set externally (the
+experiment driver says "new object now"). The auto-confusion-reset
+shown here is a sandbox convenience that approximates a real-Monty
+mechanism where an LM could self-trigger a new episode when its own
+evidence collapses.
+
 WATCH FOR
 The archetype tally on the right side filling in as you encounter each
 type. Position coords telling you where you are in the infinite world.
 The hypothesis funnel collapsing per pulse. Switch modes mid-flight to
 feel the difference between a single LM grinding and 9 LMs voting in
-parallel.`)
+parallel. Watch the confusion streak counter climb when you fly from
+one object type to another — at 3 it triggers a fresh inference run.`)
 
 briefing_fleet := cstring(
 `WHAT'S HAPPENING

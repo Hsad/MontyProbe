@@ -75,6 +75,12 @@ L9_State :: struct {
 	converge_time:      f32,
 	converge_steps:     int,
 
+	// Self-reset on confusion — if observations consistently contradict the
+	// current MLH, count up; when the counter exceeds a threshold we trigger
+	// a new inference episode automatically so the player doesn't have to
+	// press N every time they fly to a different object.
+	confusion_streak:   int,
+
 	message:            cstring,
 	message_timer:      f32,
 	show_help:          bool,
@@ -183,6 +189,31 @@ diag_post :: proc(game: ^Game_State) {
 		l9.converge_time  = f32(rl.GetTime())
 		l9.converge_steps = lm.step_count
 	}
+
+	// Track confusion at the MLH — strongly negative deltas suggest the
+	// world has changed under us (we converged on object A but are now
+	// looking at object B, whose hypotheses are gone).
+	CONFUSION_THRESHOLD :: 3
+	if lm.mlh_idx >= 0 && lm.mlh_idx < lm.hyp_count && lm.step_count > 0 {
+		delta := lm.step_info[lm.mlh_idx].delta
+		if delta < -0.3 {
+			l9.confusion_streak += 1
+		} else if delta > 0.2 {
+			// Positive evidence — we're back on the rails
+			if l9.confusion_streak > 0 do l9.confusion_streak -= 1
+		}
+	}
+}
+
+// Returns true if we just auto-reset due to sustained confusion at MLH
+@(private = "file")
+maybe_self_reset :: proc(game: ^Game_State) -> bool {
+	CONFUSION_THRESHOLD :: 3
+	if l9.confusion_streak < CONFUSION_THRESHOLD do return false
+	l9_reset_lms(game)
+	l9.message       = "Self-reset — observations contradicted MLH for several steps in a row.\nLM started a new inference episode."
+	l9.message_timer = 3.5
+	return true
 }
 
 @(private = "file")
@@ -242,6 +273,7 @@ l9_pulse_single :: proc(game: ^Game_State) {
 		l9_record_id(game, lm)
 	}
 	log_append({t = now, valid = true, cell_idx = -1, obj_name = obj.name, cmp = cmp})
+	maybe_self_reset(game)
 }
 
 @(private = "file")
@@ -339,6 +371,8 @@ l9_pulse_array :: proc(game: ^Game_State) {
 			}
 		}
 	}
+
+	maybe_self_reset(game)
 }
 
 @(private = "file")
@@ -353,6 +387,7 @@ l9_reset_lms :: proc(game: ^Game_State) {
 	l9.mlh_evidence_prev = 0
 	l9.converge_time     = 0
 	l9.converge_steps    = 0
+	l9.confusion_streak  = 0
 }
 
 l9_sandbox_update :: proc(game: ^Game_State, dt: f32) {
@@ -649,6 +684,16 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 		if lm0.is_symmetric { conv_text = "✓ converged (symmetric)" ; conv_c = Color{220, 200, 100, 230} }
 	}
 	rl.DrawText(conv_text, i32(dv_x) + 10, my, 13, conv_c); my += 18
+
+	// Confusion streak — counter that triggers an auto-reset when high enough
+	if l9.confusion_streak > 0 {
+		streak_c := Color{255, 180, 100, 220}
+		if l9.confusion_streak >= 2 do streak_c = Color{255, 140, 100, 230}
+		rl.DrawText(fmt.ctprintf("confusion streak: %d / 3  (auto-reset at 3)",
+				l9.confusion_streak),
+			i32(dv_x) + 10, my, 12, streak_c)
+		my += 16
+	}
 
 	// Last step diagnostics for the MLH
 	if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count && lm0.step_count > 0 {
