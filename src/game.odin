@@ -124,6 +124,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Rangefinder",
 		description = "Sense from afar. Where should\nyou look next? Curiosity-driven scan.",
 		unlocked    = false,
+		vtable      = l5_range_vtable(),
 	}
 	game.levels[Level_ID.Eye] = {
 		name        = "Sensor Array",
