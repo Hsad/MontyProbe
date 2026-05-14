@@ -112,7 +112,7 @@ on the conceptual core.
 
 CREDITS
   Designed by Dash.
-  Built with Opus 4.7.
+  Built by Opus 4.7.
   Odin + raylib. Hack font embedded as a compile-time asset.
   NixOS dev shell — same toolchain reproducible anywhere with a flake.
   Inspired by Numenta's Thousand Brains Project and Jeff Hawkins'

@@ -110,9 +110,6 @@ level_select_draw :: proc(game: ^Game_State) {
 	subtitle :: "A Thousand Brains Journey"
 	rl.DrawText(subtitle, i32(left_center) - rl.MeasureText(subtitle, 16) / 2, 65, 16, Color{80, 120, 180, 180})
 
-	credit :: "designed by Dash  ·  built with Opus 4.7"
-	rl.DrawText(credit, i32(left_center) - rl.MeasureText(credit, 12) / 2, 86, 12, Color{70, 90, 120, 160})
-
 	// Left panel — node path
 	left_x: f32 = margin + 30
 	start_y: f32 = 100
@@ -212,6 +209,12 @@ level_select_draw :: proc(game: ^Game_State) {
 	// Controls hint
 	rl.DrawText("[UP/DOWN] Select  [ENTER] Launch  [D] Briefing  [I] About  [R] Reset  [ESC] Quit",
 		i32(sw / 2) - 360, i32(sh) - 30, 15, Color{80, 100, 140, 150})
+
+	// Attribution — bottom right corner
+	credit :: "designed by Dash  ·  Built by Opus 4.7"
+	credit_w := rl.MeasureText(credit, 13)
+	rl.DrawText(credit, i32(sw) - credit_w - 16, i32(sh) - 52, 13,
+		Color{80, 100, 140, 160})
 
 	// Briefing overlay (drawn last so it covers the selector)
 	briefing_draw(game)
