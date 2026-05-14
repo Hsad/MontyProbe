@@ -437,13 +437,17 @@ lm_generate_vote :: proc(lm: ^Learning_Module) -> (LM_Vote, bool) {
     }, true
 }
 
-// Apply incoming votes: eliminate hypotheses inconsistent with the vote
-// offset = the known spatial offset between this LM's sensor and the voter's sensor
+// Apply incoming votes: eliminate hypotheses inconsistent with the vote AND
+// modulate evidence of matching ones. Real Monty's voting is constructive
+// as well as destructive — consistent votes increment evidence in
+// proportion to how well-aligned they are.
+//   offset = the known spatial offset between this LM's sensor and the voter's
 lm_receive_vote :: proc(lm: ^Learning_Module, vote: LM_Vote, offset: Vec3, db: ^Model_Database) {
     if lm.mlh_idx < 0 do return
     if vote.evidence < lm.converge_min_evid * 0.5 do return  // ignore weak votes
 
-    VOTE_LOC_TOL :: 1.5
+    VOTE_LOC_TOL  :: f32(1.5)
+    VOTE_BOOST    :: f32(0.4)  // max evidence added per consistent vote
 
     for i in 0..<lm.hyp_count {
         h := &lm.hypotheses[i]
@@ -456,8 +460,15 @@ lm_receive_vote :: proc(lm: ^Learning_Module, vote: LM_Vote, offset: Vec3, db: ^
         // Same object: check if locations are consistent given the sensor offset
         // If voter is at L_v and we're displaced by `offset`, we should be at L_v + R^T*offset
         expected_loc := vote.location + linalg.transpose(vote.rotation) * offset
-        if linalg.distance(h.location, expected_loc) > VOTE_LOC_TOL {
+        d := linalg.distance(h.location, expected_loc)
+        if d > VOTE_LOC_TOL {
             h.active = false
+        } else {
+            // Boost: 1.0 for perfect alignment, 0 at the threshold.
+            // Scaled by vote.evidence so confident voters carry more weight.
+            alignment := 1 - d / VOTE_LOC_TOL
+            confidence := clamp(vote.evidence / (lm.converge_min_evid * 2), 0, 1)
+            h.evidence += alignment * confidence * VOTE_BOOST
         }
     }
 }
