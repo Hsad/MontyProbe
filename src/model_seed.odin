@@ -17,7 +17,8 @@ seed_sphere :: proc(db: ^Model_Database, name: cstring, radius: f32, mat: Surfac
 		roughness   = mat.roughness,
 		temperature = mat.temperature,
 		color       = mat.color,
-		mask        = {.Roughness, .Temperature, .Color},
+		resonance   = mat.resonance,
+		mask        = {.Roughness, .Temperature, .Color, .Resonance},
 	}
 
 	phi := math.PI * (3 - math.sqrt(f32(5)))   // golden angle
@@ -49,7 +50,8 @@ seed_cube :: proc(db: ^Model_Database, name: cstring, half: f32, mat: Surface_Ma
 		roughness   = mat.roughness,
 		temperature = mat.temperature,
 		color       = mat.color,
-		mask        = {.Roughness, .Temperature, .Color},
+		resonance   = mat.resonance,
+		mask        = {.Roughness, .Temperature, .Color, .Resonance},
 	}
 
 	faces := [6][2]Vec3{
@@ -94,7 +96,8 @@ seed_cylinder :: proc(db: ^Model_Database, name: cstring, radius, half_h: f32, m
 		roughness   = mat.roughness,
 		temperature = mat.temperature,
 		color       = mat.color,
-		mask        = {.Roughness, .Temperature, .Color},
+		resonance   = mat.resonance,
+		mask        = {.Roughness, .Temperature, .Color, .Resonance},
 	}
 
 	for ai in 0..<n_around {

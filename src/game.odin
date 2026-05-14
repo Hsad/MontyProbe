@@ -138,6 +138,7 @@ game_init :: proc(game: ^Game_State) {
 		sensor_name = "Sonar",
 		description = "Sound gives shape and material.\nDifferent modality, same protocol.",
 		unlocked    = false,
+		vtable      = l7_sonar_vtable(),
 	}
 	game.levels[Level_ID.Fleet] = {
 		name        = "Composition",

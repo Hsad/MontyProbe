@@ -22,11 +22,12 @@ Stored_Features :: struct {
     temperature: f32,
     color:       Vec3,
     chem:        Chem_Signature,
+    resonance:   f32,
     mask:        Stored_Feature_Mask,
 }
 
 Stored_Feature_Mask :: bit_set[Stored_Feature_Kind; u8]
-Stored_Feature_Kind :: enum u8 { Roughness, Temperature, Color, Chemical }
+Stored_Feature_Kind :: enum u8 { Roughness, Temperature, Color, Chemical, Resonance }
 
 Graph_Node :: struct {
     location:  Vec3,           // position in object-local frame
@@ -97,5 +98,6 @@ features_to_stored :: proc(f: Features) -> Stored_Features {
     if r, ok := f.roughness.?;   ok { s.roughness    = r; s.mask += {.Roughness}    }
     if t, ok := f.temperature.?; ok { s.temperature  = t; s.mask += {.Temperature}  }
     if c, ok := f.color.?;       ok { s.color        = c; s.mask += {.Color}        }
+    if r, ok := f.resonance.?;   ok { s.resonance    = r; s.mask += {.Resonance}    }
     return s
 }

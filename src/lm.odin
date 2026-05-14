@@ -380,6 +380,7 @@ ROUGHNESS_TOL  :: 0.25
 TEMP_TOL       :: 0.30
 COLOR_TOL      :: 0.20
 CHEM_TOL       :: 0.20
+RESONANCE_TOL  :: 0.25
 
 lm_feature_score :: proc(sensed: Features, stored: Stored_Features) -> f32 {
     score: f32
@@ -405,6 +406,12 @@ lm_feature_score :: proc(sensed: Features, stored: Stored_Features) -> f32 {
         if c, ok := sensed.color.?; ok {
             diff := linalg.distance(c, stored.color)
             score += max(0, 1 - diff / COLOR_TOL)
+            count += 1
+        }
+    }
+    if .Resonance in stored.mask {
+        if r, ok := sensed.resonance.?; ok {
+            score += feature_match(r, stored.resonance, RESONANCE_TOL)
             count += 1
         }
     }
