@@ -233,11 +233,11 @@ briefing_draw :: proc(game: ^Game_State) {
 	rl.DrawRectangleRounded({px, py, pw, ph}, 0.02, 8, Color{15, 20, 30, 250})
 	rl.DrawRectangleRoundedLinesEx({px, py, pw, ph}, 0.02, 8, 2, Color{100, 160, 220, 220})
 
-	// Header — level name + sensor + status
-	draw(info.name, i32(px) + 28, i32(py) + 22, 40, Color{255, 255, 255, 255})
-	draw(info.sensor_name, i32(px) + 28, i32(py) + 70, 22, Color{120, 220, 160, 200})
+	// Header — level name + sensor + status (raylib default font)
+	rl.DrawText(info.name,        i32(px) + 28, i32(py) + 22, 40, Color{255, 255, 255, 255})
+	rl.DrawText(info.sensor_name, i32(px) + 28, i32(py) + 70, 22, Color{120, 220, 160, 200})
 
-	// Status pill on the right
+	// Status pill on the right (raylib default font)
 	status_text: cstring = "UNLOCKED"
 	status_c := Color{120, 180, 255, 230}
 	if info.completed {
@@ -247,15 +247,15 @@ briefing_draw :: proc(game: ^Game_State) {
 		status_text = "LOCKED"
 		status_c = Color{255, 140, 120, 220}
 	}
-	st_w := measure(status_text, 20)
-	draw(status_text, i32(px + pw) - i32(st_w) - 28, i32(py) + 28, 20, status_c)
+	st_w := rl.MeasureText(status_text, 20)
+	rl.DrawText(status_text, i32(px + pw) - st_w - 28, i32(py) + 28, 20, status_c)
 
 	// Horizontal rule
 	rl.DrawLine(i32(px) + 28, i32(py) + 110, i32(px + pw) - 28, i32(py) + 110,
 		Color{60, 80, 120, 150})
 
-	// Overview
-	draw("OVERVIEW", i32(px) + 28, i32(py) + 124, 18, Color{120, 180, 255, 200})
+	// Overview — section label uses raylib default font; body uses Hack
+	rl.DrawText("OVERVIEW", i32(px) + 28, i32(py) + 124, 18, Color{120, 180, 255, 200})
 	if info.description != nil {
 		draw(info.description, i32(px) + 28, i32(py) + 148, 21,
 			Color{220, 230, 240, 230})
@@ -325,12 +325,14 @@ briefing_draw_detail :: proc(text: cstring, x, y, w: i32) {
 			case "THE MONTY CONCEPT": c = Color{120, 220, 160, 230}
 			case "WATCH FOR":         c = Color{220, 160, 255, 230}
 			}
-			draw(line_cstr, x, cy, header_size, c)
-			tw := measure(line_cstr, header_size)
+			// Headers use raylib's default font for visual contrast
+			rl.DrawText(line_cstr, x, cy, i32(header_size), c)
+			tw := rl.MeasureText(line_cstr, i32(header_size))
 			cy += line_h
-			rl.DrawLine(x, cy - 4, x + i32(tw), cy - 4, c)
+			rl.DrawLine(x, cy - 4, x + tw, cy - 4, c)
 			cy += 6
 		} else {
+			// Body prose uses Hack
 			draw(line_cstr, x, cy, body_size, Color{210, 220, 235, 230})
 			cy += line_h
 		}
