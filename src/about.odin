@@ -108,7 +108,15 @@ REAL MONTY POINTERS
 The actual Monty source is about 30K lines of Python with comprehensive
 configurability, multiple matching strategies, and integration with
 real robotics simulators. This game is about 5K lines of Odin focused
-on the conceptual core.`)
+on the conceptual core.
+
+CREDITS
+  Designed by Dash.
+  Built with Opus 4.7.
+  Odin + raylib. Hack font embedded as a compile-time asset.
+  NixOS dev shell — same toolchain reproducible anywhere with a flake.
+  Inspired by Numenta's Thousand Brains Project and Jeff Hawkins'
+  book "A Thousand Brains."`)
 
 @(private = "file")
 about_open := false

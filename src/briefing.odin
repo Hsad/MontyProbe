@@ -404,7 +404,7 @@ briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 		switch line {
 		case "WHAT'S HAPPENING", "THE MONTY CONCEPT", "WATCH FOR",
 		     "THE PROJECT", "WHAT'S FAITHFUL", "WHAT'S SIMPLIFIED",
-		     "WHY THE DIFFERENCES", "REAL MONTY POINTERS":
+		     "WHY THE DIFFERENCES", "REAL MONTY POINTERS", "CREDITS":
 			return true
 		}
 		return false
@@ -437,6 +437,7 @@ briefing_draw_detail :: proc(text: cstring, x, y: i32) -> i32 {
 			case "WHAT'S SIMPLIFIED":    c = Color{255, 200, 100, 230}
 			case "WHY THE DIFFERENCES":  c = Color{180, 200, 240, 230}
 			case "REAL MONTY POINTERS":  c = Color{120, 220, 255, 230}
+			case "CREDITS":              c = Color{255, 200, 200, 230}
 			}
 			// Headers use raylib's default font for visual contrast
 			rl.DrawText(line_cstr, x, cy, i32(header_size), c)
