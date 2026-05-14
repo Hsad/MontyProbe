@@ -257,6 +257,7 @@ monty_concept_for_level :: proc(level: Level_ID) -> cstring {
 	case .Eye:     return "Thousand brains — SDR representation"
 	case .Sonar:   return "Cross-modal CMP integration"
 	case .Fleet:   return "Hierarchical composition"
+	case .Sandbox: return "Free play — every sensor, infinite world"
 	}
 	return nil
 }

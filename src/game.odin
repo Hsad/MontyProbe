@@ -17,6 +17,7 @@ Level_ID :: enum {
 	Eye,
 	Sonar,
 	Fleet,
+	Sandbox,
 }
 
 LEVEL_COUNT :: len(Level_ID)
@@ -156,6 +157,14 @@ game_init :: proc(game: ^Game_State) {
 		detail      = briefing_fleet,
 		unlocked    = false,
 		vtable      = l8_fleet_vtable(),
+	}
+	game.levels[Level_ID.Sandbox] = {
+		name        = "Sandbox",
+		sensor_name = "All Sensors",
+		description = "Infinite procedural world.\nSwitch sensors and explore freely.",
+		detail      = briefing_sandbox,
+		unlocked    = false,
+		vtable      = l9_sandbox_vtable(),
 	}
 
 	ship_init(&game.ship)

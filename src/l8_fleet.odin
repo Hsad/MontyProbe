@@ -232,6 +232,7 @@ fleet_check_compositions :: proc(game: ^Game_State) {
 		if l8.unique_comps >= COMP_TO_WIN && !l8.completed {
 			l8.completed = true
 			game.levels[Level_ID.Fleet].completed = true
+			game.levels[Level_ID.Sandbox].unlocked = true
 			save_write(game)
 			popup_show_delayed(game, .Level_Complete, 1.5)
 		}

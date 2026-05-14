@@ -35,6 +35,9 @@ World_Object :: struct {
 	rotation: f32,
 	material: Surface_Material,
 	name:     cstring,
+	// Procedural streaming: which (cell_x, cell_z) this object owns
+	cell_x:   i32,
+	cell_z:   i32,
 }
 
 World :: struct {

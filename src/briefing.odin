@@ -175,6 +175,32 @@ object → green "CROSS-MODAL AGREEMENT". When they disagree → yellow
 warning showing what each thinks. Each LM uses entirely different
 feature evidence, yet they converge on the same identity.`)
 
+briefing_sandbox := cstring(
+`WHAT'S HAPPENING
+An infinite procedurally-generated world. Each cell on a 2D hash grid
+either holds an object or doesn't, deterministically — fly back and
+you'll find the same things. Six archetypes (Iron Asteroid, Ice Boulder,
+Crystal Spire, Lava Rock, Methane Pocket, Metal Debris), each distinct
+on every feature dimension. Press [TAB] to toggle between single-laser
+and 9-cell optic-array modes. [N] resets the LMs for a fresh episode.
+
+THE MONTY CONCEPT
+This is free play — every concept from every prior level applies. The
+same algorithm scales: a single LM does fine on simple objects but the
+9-LM array converges faster with lateral voting. The model database is
+pre-loaded with all six archetypes so anything you find is identifiable
+by features-at-pose. Streaming object generation keeps memory bounded:
+objects spawn within view radius, get culled past it. The procedural
+hash means the world is large but reproducible — same coords, same
+content.
+
+WATCH FOR
+The archetype tally on the right side filling in as you encounter each
+type. Position coords telling you where you are in the infinite world.
+The hypothesis funnel collapsing per pulse. Switch modes mid-flight to
+feel the difference between a single LM grinding and 9 LMs voting in
+parallel.`)
+
 briefing_fleet := cstring(
 `WHAT'S HAPPENING
 Three drones run lower-level LMs identifying single world objects. The
