@@ -72,8 +72,8 @@ l5_range_init :: proc(game: ^Game_State) {
 	l5 = {}
 	l5.current_wobj  = -1
 	l5.show_help     = true
-	l5.message       = "Laser rangefinder online. Aim with the ship, [F] to pulse.\nThe glowing sphere shows where the next probe would\nbest disambiguate the top two candidates."
-	l5.message_timer = 8
+	l5.message       = "Laser rangefinder online. [F] to pulse, [N] for new episode.\nThe LM keeps accumulating across every pulse — if you swing\nto another object, you'll see evidence rebalance live."
+	l5.message_timer = 9
 
 	game.ship.pos     = {0, 0, -8}
 	game.ship.heading = 0
@@ -138,14 +138,7 @@ l5_register_pulse :: proc(game: ^Game_State, wobj_idx: int, hit, normal: Vec3, p
 	l5.last_cmp_world = hit
 	l5.last_cmp_valid = true
 	l5.pulse_anim     = 1.0
-
-	// Switched object? Reset inference episode.
-	if wobj_idx != l5.current_wobj {
-		l5.current_wobj   = wobj_idx
-		l5.probes_current = 0
-		lm_init(&game.lms[0], 0)
-		lm_start_inference(&game.lms[0], &game.model_db)
-	}
+	l5.current_wobj   = wobj_idx  // tracked for "which object got the last pulse" — never used to reset
 
 	disp: Vec3 = {0, 0, 0}
 	if l5.probes_current > 0 do disp = game.ship.pos - prev_ship_pos
@@ -266,6 +259,16 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 	if l5.cooldown > 0   do l5.cooldown -= dt
 	if l5.pulse_anim > 0 do l5.pulse_anim -= dt * 2
 
+	// [N] — start a new inference episode (explicit, player-driven)
+	if rl.IsKeyPressed(.N) {
+		lm_init(&game.lms[0], 0)
+		lm_start_inference(&game.lms[0], &game.model_db)
+		l5.probes_current = 0
+		l5.hint_valid     = false
+		l5.message        = "NEW EPISODE — hypothesis space reset."
+		l5.message_timer  = 2
+	}
+
 	if (rl.IsKeyPressed(.F) || (rl.IsKeyDown(.SPACE) && l5.cooldown <= 0)) && !l5.completed {
 		fwd := ship_forward(ship)
 		idx, hit, normal, _ := l5_raycast(&game.world, ship.pos, fwd)
@@ -280,16 +283,16 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 		l5.cooldown = LASER_COOLDOWN
 	}
 
-	// Check for convergence on a new object
+	// Check for convergence — record the winner if it's a new identification
 	lm := &game.lms[0]
-	if lm.converged && lm.winner_obj >= 0 && l5.current_wobj >= 0 {
-		if lm.winner_obj == l5.current_wobj && !l5.identified[l5.current_wobj] {
-			l5.identified[l5.current_wobj] = true
+	if lm.converged && lm.winner_obj >= 0 {
+		if lm.winner_obj < len(l5.identified) && !l5.identified[lm.winner_obj] {
+			l5.identified[lm.winner_obj] = true
 			l5.unique_ids += 1
-			name := game.world.objects[l5.current_wobj].name
-			l5.message = fmt.ctprintf("Identified: %s in %d probes  (%d/%d)\nAim at another object.",
+			name := game.world.objects[lm.winner_obj].name
+			l5.message = fmt.ctprintf("Identified: %s in %d probes  (%d/%d)\n[N] for new episode, then aim at another object.",
 				name, l5.probes_current, l5.unique_ids, RANGE_TARGETS_TO_WIN)
-			l5.message_timer = 4
+			l5.message_timer = 5
 
 			if l5.unique_ids >= RANGE_TARGETS_TO_WIN && !l5.completed {
 				l5.completed = true
@@ -481,7 +484,7 @@ l5_range_draw_ui :: proc(game: ^Game_State) {
 	}
 
 	if l5.show_help {
-		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto-pulse  [H] Help  [ESC] Back",
+		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto-pulse  [N] New episode  [H] Help  [ESC] Back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 

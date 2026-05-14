@@ -70,8 +70,8 @@ l4_init :: proc(game: ^Game_State) {
 	l4.all_voting     = true
 	for i in 0..<NUM_DRONES { l4.converged_step[i] = -1 }
 	l4.show_help     = true
-	l4.message       = "Fly near an object — drones probe whatever is closest.\nAll three are SHARING VOTES.\nPress [SPACE] to switch to solo (no sharing) and feel the difference."
-	l4.message_timer = 9
+	l4.message       = "Fly near an object — drones probe whatever is closest.\nAll three drones SHARING VOTES. LMs accumulate across all probes.\n[SPACE] toggle voting/solo   [N] new episode (reset LMs)"
+	l4.message_timer = 10
 
 	// Reset mothership at origin
 	game.ship.pos     = {0, 0, 0}
@@ -201,6 +201,14 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		l4.message_timer = 3
 	}
 
+	// [N] — explicit new episode for all drones
+	if rl.IsKeyPressed(.N) {
+		l4_capture_run_avg(game)
+		l4_reset_drone_lms(game, l4.current_target)
+		l4.message       = "NEW EPISODE — all drone LMs reset."
+		l4.message_timer = 2
+	}
+
 	ship := &game.ship
 
 	// flight (same as other levels)
@@ -239,12 +247,16 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		}
 	}
 
-	// Target changed → record the finishing run, then reset every LM
+	// Target changed — update tracking only; LMs keep accumulating.
+	// Pressing [N] starts a fresh inference episode explicitly.
 	if new_target != l4.current_target {
 		l4_capture_run_avg(game)
 		l4.prev_target    = l4.current_target
 		l4.current_target = new_target
-		l4_reset_drone_lms(game, new_target)
+		// Drones need a target_wobj to know what to probe, but LMs are NOT reset
+		for di in 0..<NUM_DRONES {
+			game.ship.drones[di].target_wobj = new_target
+		}
 	}
 
 	// drone behaviour: orbit mothership; lean toward target when locked
@@ -307,21 +319,22 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 		}
 	}
 
-	// Identification: count distinct objects that ≥2 drones agreed on
-	if l4.current_target >= 0 && !l4.identified[l4.current_target] {
-		agree := 0
-		for i in 0..<NUM_DRONES {
-			lm := &game.lms[i + 1]
-			if lm.converged && lm.winner_obj == l4.current_target {
-				agree += 1
-			}
+	// Identification: count distinct objects that ≥2 drones independently
+	// converged on (no ground-truth target check — purely the LMs' opinion)
+	winner_votes := [MAX_OBJECTS]int{}
+	for i in 0..<NUM_DRONES {
+		lm := &game.lms[i + 1]
+		if lm.converged && lm.winner_obj >= 0 && lm.winner_obj < MAX_OBJECTS {
+			winner_votes[lm.winner_obj] += 1
 		}
-		if agree >= 2 {
-			l4.identified[l4.current_target] = true
+	}
+	for oi in 0..<game.model_db.object_count {
+		if winner_votes[oi] >= 2 && oi < len(l4.identified) && !l4.identified[oi] {
+			l4.identified[oi] = true
 			l4.unique_ids += 1
-			name := game.world.objects[l4.current_target].name
-			l4.message       = fmt.ctprintf("Identified: %s  (%d/%d)\nFly to another object.", name, l4.unique_ids, UNIQUE_TO_WIN)
-			l4.message_timer = 4
+			name := game.model_db.objects[oi].name
+			l4.message       = fmt.ctprintf("Identified: %s  (%d/%d)\n[N] for new episode then fly to another object.", name, l4.unique_ids, UNIQUE_TO_WIN)
+			l4.message_timer = 5
 
 			if l4.unique_ids >= UNIQUE_TO_WIN && !l4.completed {
 				l4.completed = true
@@ -546,7 +559,7 @@ l4_draw_ui :: proc(game: ^Game_State) {
 
 	// Help bar
 	if l4.show_help {
-		rl.DrawText("[WASD] Fly mothership   [SPACE] toggle voting/solo   [H] help   [ESC] back",
+		rl.DrawText("[WASD] Fly   [SPACE] toggle voting/solo   [N] new episode   [H] help   [ESC] back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 
