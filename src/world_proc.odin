@@ -20,7 +20,8 @@ PROC_VIEW_RADIUS :: f32(38)
 PROC_DENSITY     :: 30   // percent of cells that contain an object
 PROC_BUFFER      :: f32(6)
 
-@(private = "file")
+// Package-visible — l9_sandbox uses it to seed dust-cloud particle positions
+// per cell so unknown objects don't shimmer randomly each frame.
 hash_2d :: proc(x, z: i32) -> u32 {
 	h := u32(x) * 73856093 ~ u32(z) * 19349663
 	h ~= h >> 13
@@ -38,51 +39,103 @@ Proc_Archetype :: struct {
 	material: Surface_Material,
 }
 
-// Six archetypes — each distinct on multiple feature dimensions so that
-// any sensor modality has something to discriminate by
-proc_archetypes := [6]Proc_Archetype{
-	{
-		name = "Iron Asteroid",
-		kind = .Sphere,
-		size = 2.4,
-		material = {roughness = 0.75, temperature = 0.65, color = {0.62, 0.32, 0.18},
-		            smell = 0.30, chem_sig = {0.85, 0.10, 0.10}, resonance = 0.92},
-	},
-	{
-		name = "Ice Boulder",
-		kind = .Sphere,
-		size = 2.0,
-		material = {roughness = 0.18, temperature = 0.05, color = {0.72, 0.85, 0.98},
-		            smell = 0.05, chem_sig = {0.05, 0.10, 0.90}, resonance = 0.22},
-	},
-	{
-		name = "Crystal Spire",
-		kind = .Cylinder,
-		size = 1.4,
-		material = {roughness = 0.10, temperature = 0.15, color = {0.55, 0.90, 1.00},
-		            smell = 0.00, chem_sig = {0.05, 0.30, 0.85}, resonance = 0.70},
-	},
-	{
-		name = "Lava Rock",
-		kind = .Sphere,
-		size = 1.9,
-		material = {roughness = 0.60, temperature = 0.95, color = {0.95, 0.40, 0.10},
-		            smell = 0.70, chem_sig = {0.80, 0.50, 0.10}, resonance = 0.50},
-	},
-	{
-		name = "Methane Pocket",
-		kind = .Sphere,
-		size = 1.7,
-		material = {roughness = 0.08, temperature = 0.40, color = {0.55, 0.85, 0.35},
-		            smell = 0.95, chem_sig = {0.20, 0.95, 0.20}, resonance = 0.15},
-	},
-	{
-		name = "Metal Debris",
-		kind = .Cube,
-		size = 1.5,
-		material = {roughness = 0.40, temperature = 0.20, color = {0.72, 0.72, 0.78},
-		            smell = 0.10, chem_sig = {0.50, 0.20, 0.30}, resonance = 0.97},
-	},
+// 25 hand-named archetypes — invented mineral-style names so the player
+// has no prior knowledge of what each one means. Phonetic clusters loosely
+// track feature clusters (hard consonants for hot/metallic, soft sounds
+// for cold/organic, sharp/clear for crystalline), but the mapping is
+// suggestive rather than literal. Adjacent entries (e.g. Rhust vs Pyrith)
+// are designed to be only mildly similar, so an LM trained on one will
+// not auto-match the other — discovering a new type means committing a
+// new graph.
+proc_archetypes := [25]Proc_Archetype{
+	// ── hot / metallic / red ──────────────────────────────────────────
+	{ name = "Rhust",    kind = .Sphere,   size = 2.4,
+	  material = {roughness=0.75, temperature=0.65, color={0.62, 0.32, 0.18},
+	              smell=0.30, chem_sig={0.85, 0.10, 0.10}, resonance=0.92} },
+	{ name = "Norv",     kind = .Sphere,   size = 1.9,
+	  material = {roughness=0.60, temperature=0.95, color={0.95, 0.40, 0.10},
+	              smell=0.70, chem_sig={0.80, 0.50, 0.10}, resonance=0.50} },
+	{ name = "Pyrith",   kind = .Cube,     size = 1.4,
+	  material = {roughness=0.30, temperature=0.50, color={0.85, 0.75, 0.20},
+	              smell=0.15, chem_sig={0.60, 0.15, 0.25}, resonance=0.88} },
+	{ name = "Glant",    kind = .Cube,     size = 1.5,
+	  material = {roughness=0.65, temperature=0.90, color={0.80, 0.20, 0.05},
+	              smell=0.60, chem_sig={0.80, 0.20, 0.05}, resonance=0.20} },
+
+	// ── cold / icy ────────────────────────────────────────────────────
+	{ name = "Frell",    kind = .Sphere,   size = 2.0,
+	  material = {roughness=0.18, temperature=0.05, color={0.72, 0.85, 0.98},
+	              smell=0.05, chem_sig={0.05, 0.10, 0.90}, resonance=0.22} },
+	{ name = "Vyrn",     kind = .Sphere,   size = 1.7,
+	  material = {roughness=0.30, temperature=0.02, color={0.85, 0.92, 0.95},
+	              smell=0.10, chem_sig={0.10, 0.10, 0.85}, resonance=0.55} },
+	{ name = "Skril",    kind = .Cube,     size = 1.6,
+	  material = {roughness=0.15, temperature=0.08, color={0.80, 0.92, 1.00},
+	              smell=0.00, chem_sig={0.05, 0.05, 0.95}, resonance=0.35} },
+
+	// ── crystalline ───────────────────────────────────────────────────
+	{ name = "Lumix",    kind = .Cylinder, size = 1.4,
+	  material = {roughness=0.10, temperature=0.15, color={0.55, 0.90, 1.00},
+	              smell=0.00, chem_sig={0.05, 0.30, 0.85}, resonance=0.75} },
+	{ name = "Klarth",   kind = .Cube,     size = 1.5,
+	  material = {roughness=0.20, temperature=0.30, color={0.92, 0.92, 0.96},
+	              smell=0.00, chem_sig={0.15, 0.15, 0.70}, resonance=0.80} },
+	{ name = "Vexal",    kind = .Cylinder, size = 1.3,
+	  material = {roughness=0.15, temperature=0.20, color={0.55, 0.30, 0.70},
+	              smell=0.00, chem_sig={0.10, 0.30, 0.60}, resonance=0.65} },
+	{ name = "Obraal",   kind = .Cube,     size = 1.5,
+	  material = {roughness=0.05, temperature=0.30, color={0.10, 0.10, 0.15},
+	              smell=0.05, chem_sig={0.30, 0.10, 0.30}, resonance=0.85} },
+
+	// ── organic / biological ──────────────────────────────────────────
+	{ name = "Sluvven",  kind = .Sphere,   size = 1.7,
+	  material = {roughness=0.08, temperature=0.35, color={0.55, 0.85, 0.35},
+	              smell=0.95, chem_sig={0.20, 0.85, 0.20}, resonance=0.15} },
+	{ name = "Vossen",   kind = .Sphere,   size = 1.8,
+	  material = {roughness=0.55, temperature=0.40, color={0.30, 0.65, 0.35},
+	              smell=0.50, chem_sig={0.10, 0.85, 0.10}, resonance=0.30} },
+	{ name = "Mornyl",   kind = .Sphere,   size = 1.6,
+	  material = {roughness=0.85, temperature=0.45, color={0.45, 0.25, 0.45},
+	              smell=0.75, chem_sig={0.20, 0.65, 0.20}, resonance=0.25} },
+	{ name = "Velm",     kind = .Sphere,   size = 1.6,
+	  material = {roughness=0.03, temperature=0.40, color={0.75, 0.85, 0.30},
+	              smell=0.90, chem_sig={0.10, 0.80, 0.10}, resonance=0.08} },
+	{ name = "Phorr",    kind = .Sphere,   size = 1.4,
+	  material = {roughness=0.40, temperature=0.55, color={0.35, 0.95, 0.40},
+	              smell=0.45, chem_sig={0.10, 0.80, 0.10}, resonance=0.20} },
+
+	// ── acidic / sulfurous ────────────────────────────────────────────
+	{ name = "Khorn",    kind = .Cylinder, size = 1.3,
+	  material = {roughness=0.25, temperature=0.55, color={0.95, 0.90, 0.30},
+	              smell=0.85, chem_sig={0.95, 0.05, 0.00}, resonance=0.40} },
+	{ name = "Rhys",     kind = .Sphere,   size = 1.5,
+	  material = {roughness=0.25, temperature=0.55, color={0.60, 0.95, 0.20},
+	              smell=0.80, chem_sig={0.30, 0.55, 0.15}, resonance=0.18} },
+
+	// ── manufactured / metallic ───────────────────────────────────────
+	{ name = "Tark",     kind = .Cube,     size = 1.5,
+	  material = {roughness=0.40, temperature=0.20, color={0.72, 0.72, 0.78},
+	              smell=0.10, chem_sig={0.50, 0.20, 0.30}, resonance=0.97} },
+	{ name = "Stenor",   kind = .Cube,     size = 1.3,
+	  material = {roughness=0.20, temperature=0.10, color={0.55, 0.60, 0.68},
+	              smell=0.00, chem_sig={0.50, 0.10, 0.40}, resonance=0.98} },
+	{ name = "Brog",     kind = .Cube,     size = 1.4,
+	  material = {roughness=0.50, temperature=0.40, color={0.80, 0.55, 0.30},
+	              smell=0.05, chem_sig={0.55, 0.20, 0.30}, resonance=0.78} },
+	{ name = "Rustaal",  kind = .Cube,     size = 1.6,
+	  material = {roughness=0.85, temperature=0.35, color={0.65, 0.30, 0.10},
+	              smell=0.20, chem_sig={0.65, 0.15, 0.30}, resonance=0.45} },
+
+	// ── exotic ────────────────────────────────────────────────────────
+	{ name = "Zem",      kind = .Sphere,   size = 1.8,
+	  material = {roughness=0.05, temperature=0.98, color={0.95, 0.30, 0.85},
+	              smell=0.40, chem_sig={0.40, 0.30, 0.30}, resonance=0.05} },
+	{ name = "Glym",     kind = .Cube,     size = 1.4,
+	  material = {roughness=0.05, temperature=0.75, color={0.08, 0.05, 0.12},
+	              smell=0.15, chem_sig={0.40, 0.20, 0.20}, resonance=0.92} },
+	{ name = "Crylth",   kind = .Cylinder, size = 1.5,
+	  material = {roughness=0.70, temperature=0.45, color={0.95, 0.55, 0.55},
+	              smell=0.20, chem_sig={0.30, 0.50, 0.30}, resonance=0.40} },
 }
 
 // Pre-load all archetypes into the model database so the LM can

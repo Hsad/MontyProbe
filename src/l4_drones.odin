@@ -280,10 +280,14 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 			desired_pos += lean
 		}
 
-		drone.prev_pos = drone.pos
 		drone.pos += (desired_pos - drone.pos) * dt * 4
 
-		// probing — only if we have a target and we're close enough to it
+		// probing — only if we have a target and we're close enough to it.
+		// Displacement is the HIT-POINT (CMP location) delta since last probe,
+		// not drone-position delta. Drone sits ~5-7 units away in orbit; the
+		// contact point on the object surface moves differently than the drone.
+		// Voting happens immediately AFTER a probe so evidence boosts stay
+		// tied to real new evidence rather than framerate.
 		if l4.current_target >= 0 && !lm.converged {
 			target_obj := &game.world.objects[l4.current_target]
 			d_to_target := linalg.distance(drone.pos, target_obj.pos)
@@ -292,28 +296,32 @@ l4_update :: proc(game: ^Game_State, dt: f32) {
 				if drone.probe_timer <= 0 {
 					drone.probe_timer = DRONE_PROBE_PERIOD
 					cmp := l4_make_cmp_for_drone(game, drone)
-					disp: Vec3 = drone.probe_count == 0 ? Vec3{0,0,0} : drone.pos - drone.prev_pos
+					disp: Vec3 = drone.probe_count == 0 ? Vec3{0,0,0} : cmp.location - drone.prev_pos
 					lm_step(lm, cmp, disp, &game.model_db)
+					drone.prev_pos = cmp.location
 					drone.probe_count += 1
 					if lm.converged && l4.converged_step[di] < 0 {
 						l4.converged_step[di] = lm.step_count
 					}
-				}
-			}
-		}
 
-		// voting — voters share their MLH; receivers prune inconsistent hypotheses
-		if drone.use_voting && lm.mlh_idx >= 0 {
-			vote, ok := lm_generate_vote(lm)
-			if ok {
-				for other_i in 0..<NUM_DRONES {
-					if other_i == di do continue
-					if !game.ship.drones[other_i].use_voting do continue
-					other_lm := &game.lms[other_i + 1]
-					if other_lm.converged do continue
-					offset := game.ship.drones[other_i].pos - drone.pos
-					lm_receive_vote(other_lm, vote, offset, &game.model_db)
-					l4.last_vote_at = f32(rl.GetTime())
+					// Cast a vote right after the new evidence is in. Offset
+					// uses CONTACT POINTS (CMP locations), not drone positions
+					// — see lm_receive_vote docstring.
+					if drone.use_voting && lm.mlh_idx >= 0 {
+						vote, ok := lm_generate_vote(lm)
+						if ok {
+							for other_i in 0..<NUM_DRONES {
+								if other_i == di do continue
+								if !game.ship.drones[other_i].use_voting do continue
+								other_lm := &game.lms[other_i + 1]
+								if other_lm.converged do continue
+								if other_lm.step_count == 0 do continue
+								offset := other_lm.last_cmp.location - lm.last_cmp.location
+								lm_receive_vote(other_lm, vote, offset, &game.model_db)
+								l4.last_vote_at = f32(rl.GetTime())
+							}
+						}
+					}
 				}
 			}
 		}
@@ -465,6 +473,12 @@ l4_draw_ui :: proc(game: ^Game_State) {
 	mode_color:    Color   = l4.all_voting ? Color{120, 220, 255, 230} : Color{255, 180, 120, 230}
 	rl.DrawText(mode_label, 14, 60, 16, mode_color)
 	rl.DrawText("[SPACE] toggle", 14, 80, 12, Color{120, 140, 170, 180})
+
+	// Persistent objective + progression hint — always visible
+	rl.DrawText("OBJECTIVE: identify 3 unique objects (>=2 drones agree)",
+		14, 104, 14, Color{200, 230, 255, 220})
+	rl.DrawText("Fly near object -> drones converge -> [N] reset -> fly to next",
+		14, 122, 13, Color{160, 200, 230, 200})
 
 	rl.DrawText("LEVEL 4: DRONE FLEET", i32(sw) - 240, 12, 16, Color{200, 140, 255, 200})
 

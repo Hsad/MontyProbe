@@ -357,9 +357,11 @@ l8_fleet_update :: proc(game: ^Game_State, dt: f32) {
 			lean := (game.world.objects[l8.current_target].pos - ship.pos) * 0.25
 			desired += lean
 		}
-		drone.prev_pos = drone.pos
 		drone.pos += (desired - drone.pos) * dt * 4
 
+		// Hit-point delta (CMP location) is the right displacement — drones
+		// orbit in free space, but the hypothesis location is the contact
+		// point on the surface.
 		if l8.current_target >= 0 && !lm.converged {
 			target_obj := &game.world.objects[l8.current_target]
 			d := linalg.distance(drone.pos, target_obj.pos)
@@ -368,8 +370,9 @@ l8_fleet_update :: proc(game: ^Game_State, dt: f32) {
 				if drone.probe_timer <= 0 {
 					drone.probe_timer = FLEET_PROBE_PERIOD
 					cmp := fleet_make_cmp(game, drone)
-					disp: Vec3 = drone.probe_count == 0 ? Vec3{0,0,0} : drone.pos - drone.prev_pos
+					disp: Vec3 = drone.probe_count == 0 ? Vec3{0,0,0} : cmp.location - drone.prev_pos
 					lm_step(lm, cmp, disp, &game.model_db)
+					drone.prev_pos = cmp.location
 					drone.probe_count += 1
 				}
 			}

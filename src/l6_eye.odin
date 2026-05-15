@@ -43,7 +43,7 @@ L6_State :: struct {
 	cell_body_offsets: [NUM_SM_CELLS]Vec3,
 	cell_dir_offsets:  [NUM_SM_CELLS]Vec3,   // slight angular fan
 	hits:              [NUM_SM_CELLS]Cell_Hit,
-	prev_pos:          [NUM_SM_CELLS]Vec3,
+	prev_hit:          [NUM_SM_CELLS]Vec3,   // last CMP hit point (world)
 	probed_once:       [NUM_SM_CELLS]bool,
 
 	cooldown:          f32,
@@ -168,9 +168,12 @@ l6_pulse_all :: proc(game: ^Game_State) {
 			confidence  = 1.0,
 		}
 		valid[i] = true
-		// Displacement for this cell = movement since its last pulse
-		disps[i] = l6.probed_once[i] ? origin - l6.prev_pos[i] : Vec3{0, 0, 0}
-		l6.prev_pos[i] = origin
+		// Displacement for this cell = how much the CONTACT POINT moved across
+		// the surface since the last pulse. Sensor-origin delta is wrong for a
+		// rangefinder — the sensor is far from the surface, and a small origin
+		// shift can swing the hit point much more than the origin moves.
+		disps[i] = l6.probed_once[i] ? hit - l6.prev_hit[i] : Vec3{0, 0, 0}
+		l6.prev_hit[i] = hit
 		l6.probed_once[i] = true
 	}
 
@@ -180,16 +183,18 @@ l6_pulse_all :: proc(game: ^Game_State) {
 		lm_step(&game.lms[i], cmps[i], disps[i], &game.model_db)
 	}
 
-	// Third pass: lateral voting — every LM broadcasts to every other LM,
-	// using the world-frame offset between their sensor positions
+	// Third pass: lateral voting — every LM broadcasts to every other LM.
+	// Offset is the world-frame contact-point displacement (CMP locations),
+	// not sensor-cell positions; see lm_receive_vote docstring.
 	for sender in 0..<NUM_SM_CELLS {
 		if !valid[sender] do continue
 		vote, ok := lm_generate_vote(&game.lms[sender])
 		if !ok do continue
 		for receiver in 0..<NUM_SM_CELLS {
 			if receiver == sender do continue
+			if !valid[receiver] do continue
 			if game.lms[receiver].converged do continue
-			offset := l6.prev_pos[receiver] - l6.prev_pos[sender]
+			offset := game.lms[receiver].last_cmp.location - game.lms[sender].last_cmp.location
 			lm_receive_vote(&game.lms[receiver], vote, offset, &game.model_db)
 		}
 	}

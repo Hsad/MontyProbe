@@ -441,7 +441,15 @@ lm_generate_vote :: proc(lm: ^Learning_Module) -> (LM_Vote, bool) {
 // modulate evidence of matching ones. Real Monty's voting is constructive
 // as well as destructive — consistent votes increment evidence in
 // proportion to how well-aligned they are.
-//   offset = the known spatial offset between this LM's sensor and the voter's
+//   offset = WORLD-FRAME displacement between the SENSED CONTACT POINTS of
+//            the two LMs (receiver_contact_world - sender_contact_world).
+//   Why contact points and not sensor positions? Hypothesis locations live
+//   in object-local frame at stored surface nodes. The geometric identity
+//     L_receiver = L_sender + R^T * (P_receiver_world - P_sender_world)
+//   only holds when P_* are points on the surface (where the nodes are),
+//   not free-space sensor positions. Free-space offsets can be much larger
+//   than the object itself, which would mass-kill same-object hypotheses
+//   that are actually consistent.
 lm_receive_vote :: proc(lm: ^Learning_Module, vote: LM_Vote, offset: Vec3, db: ^Model_Database) {
     if lm.mlh_idx < 0 do return
     if vote.evidence < lm.converge_min_evid * 0.5 do return  // ignore weak votes

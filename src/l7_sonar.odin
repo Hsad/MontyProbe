@@ -39,7 +39,7 @@ L7_State :: struct {
 	last_obj_idx:    int,
 	last_valid:      bool,
 
-	prev_pos:        Vec3,
+	prev_hit:        Vec3,  // last CMP hit point (world)
 	probed_once:     bool,
 
 	identified:      [16]bool,
@@ -159,8 +159,10 @@ l7_pulse :: proc(game: ^Game_State) {
 	l7.last_valid     = true
 	l7.pulse_anim     = 1.0
 
-	disp: Vec3 = l7.probed_once ? ship.pos - l7.prev_pos : Vec3{0, 0, 0}
-	l7.prev_pos    = ship.pos
+	// Displacement uses HIT-POINT delta — sensor is far from the surface, so
+	// ship.pos delta isn't the right quantity (see lm_step contract).
+	disp: Vec3 = l7.probed_once ? hit - l7.prev_hit : Vec3{0, 0, 0}
+	l7.prev_hit    = hit
 	l7.probed_once = true
 
 	lm_step(&game.lms[0], optic_cmp, disp, &game.model_db)

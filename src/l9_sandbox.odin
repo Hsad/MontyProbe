@@ -4,6 +4,7 @@ import rl "vendor:raylib"
 import "core:math"
 import "core:math/linalg"
 import "core:fmt"
+import "core:strings"
 
 // Level 9 — Sandbox
 //
@@ -36,7 +37,59 @@ CONFUSION_THRESHOLD       :: 5
 CONFUSION_NEG_DELTA_GATE  :: f32(-0.4)   // delta below this counts as "wrong"
 CONFUSION_POS_DELTA_GATE  :: f32(0.4)    // delta above this decrements the streak
 
+// After convergence, hold for this many seconds so the player can see the
+// result, then auto-reset and start a fresh inference. Turns the sandbox
+// into a continuous identification stream instead of one-and-done.
+POST_CONVERGE_HOLD  :: f32(2.5)
+
+// Persistent memory of identified procedural-world instances, keyed by cell.
+// Bounded so memory stays flat; oldest entries get overwritten when full.
+MAX_IDENTIFIED_CELLS :: 512
+MAX_RECENT_IDS       :: 6
+
+// Live-learning parameters. The model_db starts EMPTY: the LM has to build
+// each archetype's graph from real probes. After NOVELTY_MIN_PROBES on the
+// same world object, if evidence is climbing too slowly (rate below
+// NOVELTY_RATE_MAX per probe), we declare the object a new type, replay
+// the buffered observations as lm_learn_steps, and commit a graph named
+// after the actual archetype (we know it because procedural generation
+// set obj.name).
+//
+// Why a RATE check, not an absolute threshold? Even a totally wrong
+// match against an existing graph can accumulate evidence steadily — a
+// Rhust hypothesis "watching" a Frell sphere scores morphology ≈ 1.0
+// per probe by coincidence (radial normals align on any sphere) while
+// features score 0. That's ~1.0 per probe of nonsense, so an absolute
+// cap gets blown through within 6-7 probes and novelty stops firing.
+// A correct recognition accumulates ~2/probe; rate-based detection
+// cleanly separates the two regimes.
+LEARN_BUFFER_SIZE  :: 16
+NOVELTY_MIN_PROBES :: 6
+NOVELTY_RATE_MAX   :: f32(1.2)   // evidence/probe below this → novelty
+NOVELTY_LEARN_NODES :: 8         // minimum probes harvested into the new graph
+
 Sandbox_Mode :: enum { Single_Laser, Optic_Array }
+
+// pattern_id is an index into game.model_db.objects — i.e. the LM's
+// committed graph that absorbed this observation. The LM has no idea
+// what proc-world archetype this corresponds to; it just knows it has
+// graph #N. The player is the one who maps "Pattern-3 = oh, that's
+// the cube I scanned earlier."
+@(private = "file")
+Identified_Cell :: struct {
+	cell_x:        i32,
+	cell_z:        i32,
+	pattern_id:    int,
+	t:             f32,
+	pos:           Vec3,
+}
+
+@(private = "file")
+Recent_Id :: struct {
+	pattern_id:    int,
+	t:             f32,
+	pos:           Vec3,
+}
 
 @(private = "file")
 Cmp_Log_Entry :: struct {
@@ -59,16 +112,18 @@ L9_State :: struct {
 	last_cmp_world:     Vec3,
 	last_cmp_valid:     bool,
 	probes_total:       int,
-	prev_pos:           Vec3,
+	prev_hit:           Vec3,  // last single-laser hit point (world)
 	probed_once:        bool,
 
 	// Optic-array bookkeeping (per-cell)
 	cell_origins:       [SANDBOX_PATCH_CELLS]Vec3,
 	cell_hits:          [SANDBOX_PATCH_CELLS]bool,
 	cell_hit_pos:       [SANDBOX_PATCH_CELLS]Vec3,
+	cell_prev_hit:      [SANDBOX_PATCH_CELLS]Vec3,  // hit point at last pulse
+	cell_probed_once:   [SANDBOX_PATCH_CELLS]bool,
 
-	// Identifications per archetype
-	id_count:           [len(proc_archetypes)]int,
+	// Identifications per committed pattern (model_db index)
+	id_count:           [MAX_OBJECTS]int,
 
 	// CMP message log (ring buffer) — every probe appends here
 	cmp_log:            [SANDBOX_CMP_LOG]Cmp_Log_Entry,
@@ -91,6 +146,39 @@ L9_State :: struct {
 	// press N every time they fly to a different object.
 	confusion_streak:   int,
 
+	// Auto-cycle: after the focus LM converges we run this countdown, then
+	// auto-reset so the player gets a stream of identifications instead of
+	// being stuck on one.
+	post_converge_timer: f32,
+	auto_cycle_enabled:  bool,
+
+	// Per-instance memory — which procedural cells have been identified, and
+	// which archetype they came out as. Used to halo recognised objects in
+	// the world and to feed the recent-IDs ticker.
+	identified_cells:   [MAX_IDENTIFIED_CELLS]Identified_Cell,
+	identified_count:   int,
+	identified_head:    int,  // ring-buffer write index when count == MAX
+
+	recent_ids:         [MAX_RECENT_IDS]Recent_Id,
+	recent_ids_head:    int,
+	recent_ids_count:   int,
+
+	// ── Live-learning state (single-laser focus LM = LM 0) ──────────────
+	// No ground-truth dedup: every novelty commit makes a fresh graph,
+	// even if it ends up being a duplicate of a prior pattern for the
+	// same true archetype. The LM has no way to know they're the same;
+	// only inference convergence can consolidate.
+	pattern_counter:    int,    // increments on each commit → graph name "Pattern-N"
+	learn_cmps:         [LEARN_BUFFER_SIZE]CMP_Message,
+	learn_disps:        [LEARN_BUFFER_SIZE]Vec3,
+	learn_count:        int,
+	learn_target_wi:    int,    // world-object index the buffer is following
+
+	// Discovery celebration
+	discovery_anim:     f32,
+	discovery_pattern:  int,    // model_db index of the freshly committed pattern
+	discovery_pos:      Vec3,
+
 	message:            cstring,
 	message_timer:      f32,
 	show_help:          bool,
@@ -111,10 +199,13 @@ l9_sandbox_vtable :: proc() -> Level_Vtable {
 
 l9_sandbox_init :: proc(game: ^Game_State) {
 	l9 = {}
-	l9.mode          = .Single_Laser
-	l9.show_help     = true
-	l9.message       = "Sandbox: infinite procedural world.\n[TAB] toggle sensor mode   [F] pulse   [N] new episode"
-	l9.message_timer = 8
+	l9.mode               = .Single_Laser
+	l9.auto_cycle_enabled = true
+	l9.show_help          = true
+	l9.learn_target_wi    = -1
+	l9.pattern_counter    = 0
+	l9.message            = "Unknown world — every object starts as a dust cloud.\nProbe one with [F] to commit a new graph (Pattern-N) for it."
+	l9.message_timer      = 10
 
 	game.ship.pos     = {0, 0, 0}
 	game.ship.heading = 0
@@ -122,8 +213,10 @@ l9_sandbox_init :: proc(game: ^Game_State) {
 	game.ship.speed   = 0
 	clear(&game.ship.trail)
 
-	// Pre-load archetypes — six target objects the LM can recognise
-	seed_proc_archetypes(&game.model_db)
+	// Start with EMPTY model_db — types are learned live as the player
+	// probes unknown objects. Once committed, a type's instances become
+	// visible across the world.
+	model_db_init(&game.model_db)
 
 	// Fresh inference on all LMs (we'll use 1 or 9 depending on mode)
 	for i in 0..<MAX_LMS {
@@ -233,13 +326,165 @@ maybe_self_reset :: proc(game: ^Game_State) -> bool {
 }
 
 @(private = "file")
-l9_record_id :: proc(game: ^Game_State, lm: ^Learning_Module) {
+l9_find_identified_cell :: proc(cell_x, cell_z: i32) -> int {
+	for i in 0..<l9.identified_count {
+		c := &l9.identified_cells[i]
+		if c.cell_x == cell_x && c.cell_z == cell_z do return i
+	}
+	return -1
+}
+
+@(private = "file")
+l9_remember_cell :: proc(cell_x, cell_z: i32, pattern_id: int, pos: Vec3, t: f32) {
+	entry := Identified_Cell{
+		cell_x = cell_x, cell_z = cell_z, pattern_id = pattern_id, pos = pos, t = t,
+	}
+	existing := l9_find_identified_cell(cell_x, cell_z)
+	if existing >= 0 {
+		l9.identified_cells[existing] = entry
+		return
+	}
+	if l9.identified_count < MAX_IDENTIFIED_CELLS {
+		l9.identified_cells[l9.identified_count] = entry
+		l9.identified_count += 1
+	} else {
+		// Ring-buffer overwrite (oldest)
+		l9.identified_cells[l9.identified_head] = entry
+		l9.identified_head = (l9.identified_head + 1) % MAX_IDENTIFIED_CELLS
+	}
+}
+
+@(private = "file")
+l9_push_recent :: proc(pattern_id: int, pos: Vec3, t: f32) {
+	l9.recent_ids[l9.recent_ids_head] = Recent_Id{ pattern_id = pattern_id, pos = pos, t = t }
+	l9.recent_ids_head = (l9.recent_ids_head + 1) % MAX_RECENT_IDS
+	if l9.recent_ids_count < MAX_RECENT_IDS do l9.recent_ids_count += 1
+}
+
+// Record an LM recognition. The pattern_id IS the model_db index the LM
+// converged on — we report Monty's actual decision, including mistakes.
+// probed_wi is the world object the user pointed at so the halo lands
+// on the right instance even when the LM is wrong about the archetype.
+@(private = "file")
+l9_record_id :: proc(game: ^Game_State, lm: ^Learning_Module, probed_wi: int) {
 	if !lm.converged || lm.winner_obj < 0 do return
 	if lm.winner_obj >= game.model_db.object_count do return
-	name := game.model_db.objects[lm.winner_obj].name
-	idx := proc_archetype_index(name)
-	if idx < 0 do return
-	l9.id_count[idx] += 1
+	pattern_id := lm.winner_obj
+	l9.id_count[pattern_id] += 1
+
+	now := f32(rl.GetTime())
+	pos: Vec3 = l9.last_cmp_world
+	if probed_wi >= 0 && probed_wi < len(game.world.objects) {
+		obj := &game.world.objects[probed_wi]
+		pos = obj.pos
+		l9_remember_cell(obj.cell_x, obj.cell_z, pattern_id, pos, now)
+	}
+	l9_push_recent(pattern_id, pos, now)
+
+	// Kick off the auto-cycle hold so the player can see this result before
+	// the LM is reset for the next inference episode.
+	if l9.auto_cycle_enabled do l9.post_converge_timer = POST_CONVERGE_HOLD
+}
+
+// Find the max evidence across all active hypotheses in any LM.
+@(private = "file")
+lm_max_active_evidence :: proc(lm: ^Learning_Module) -> f32 {
+	best: f32 = 0
+	for i in 0..<lm.hyp_count {
+		h := &lm.hypotheses[i]
+		if !h.active do continue
+		if h.evidence > best do best = h.evidence
+	}
+	return best
+}
+
+// Reset the rolling probe buffer used for novelty detection.
+@(private = "file")
+l9_reset_learn_buffer :: proc() {
+	l9.learn_count     = 0
+	l9.learn_target_wi = -1
+}
+
+// Append a fresh probe to the learn buffer. Drops oldest if full.
+@(private = "file")
+l9_buffer_push :: proc(cmp: CMP_Message, disp: Vec3) {
+	if l9.learn_count < LEARN_BUFFER_SIZE {
+		l9.learn_cmps[l9.learn_count]  = cmp
+		l9.learn_disps[l9.learn_count] = disp
+		l9.learn_count += 1
+	} else {
+		// shift left, append at end
+		for i in 1..<LEARN_BUFFER_SIZE {
+			l9.learn_cmps[i - 1]  = l9.learn_cmps[i]
+			l9.learn_disps[i - 1] = l9.learn_disps[i]
+		}
+		l9.learn_cmps[LEARN_BUFFER_SIZE - 1]  = cmp
+		l9.learn_disps[LEARN_BUFFER_SIZE - 1] = disp
+	}
+}
+
+// Commit a fresh graph from buffered probes. The graph's identity is just
+// a counter — "Pattern-1", "Pattern-2", ... The LM doesn't know what kind
+// of object it just learned; it only knows it built a new graph that
+// inference will compare against on future probes. If the LM later
+// fails to recognise another instance of the same true archetype, a
+// DIFFERENT pattern number will be committed for it. Two graphs for
+// the same underlying object is a real Monty failure mode (no
+// consolidation step).
+@(private = "file")
+l9_commit_new_pattern :: proc(game: ^Game_State) {
+	if l9.learn_count == 0 do return
+
+	l9.pattern_counter += 1
+	name := fmt.aprintf("Pattern-%d", l9.pattern_counter)
+	// aprintf allocates; store as cstring permanently. model_db keeps a
+	// reference to this string for the lifetime of the graph.
+	cname := strings.clone_to_cstring(name)
+	delete(name)
+
+	lm := &game.lms[0]
+
+	// Fresh learning episode using the buffered observations.
+	lm_init(lm, 0)
+	lm_start_learning(lm, l9.learn_cmps[0].location)
+	for i in 0..<l9.learn_count {
+		lm_learn_step(lm, l9.learn_cmps[i], l9.learn_disps[i])
+	}
+
+	obj_idx := lm_commit(lm, &game.model_db, cname)
+	if obj_idx < 0 {
+		// Model database full — re-arm inference and bail
+		lm_init(lm, 0)
+		lm_start_inference(lm, &game.model_db)
+		l9.pattern_counter -= 1   // commit failed, roll back the counter
+		return
+	}
+
+	// Refresh ALL LMs against the now-larger model_db so future probes
+	// can compare against this new graph.
+	for i in 0..<MAX_LMS {
+		lm_init(&game.lms[i], i)
+		lm_start_inference(&game.lms[i], &game.model_db)
+	}
+
+	// Celebration banner + halo
+	l9.discovery_anim    = 2.5
+	l9.discovery_pattern = obj_idx
+	l9.discovery_pos     = l9.learn_cmps[l9.learn_count - 1].location
+
+	now := f32(rl.GetTime())
+	l9_push_recent(obj_idx, l9.discovery_pos, now)
+	if l9.learn_target_wi >= 0 && l9.learn_target_wi < len(game.world.objects) {
+		obj := &game.world.objects[l9.learn_target_wi]
+		l9_remember_cell(obj.cell_x, obj.cell_z, obj_idx, obj.pos, now)
+	}
+
+	l9.message       = fmt.ctprintf("NEW PATTERN COMMITTED: %s\n(%d nodes from %d probes)",
+		cname, game.model_db.objects[obj_idx].node_count, l9.learn_count)
+	l9.message_timer = 4
+
+	// Clear the buffer — fresh inference starts now.
+	l9_reset_learn_buffer()
 }
 
 @(private = "file")
@@ -276,18 +521,57 @@ l9_pulse_single :: proc(game: ^Game_State) {
 	l9.pulse_anim     = 1.0
 	l9.probes_total  += 1
 
-	disp: Vec3 = l9.probed_once ? ship.pos - l9.prev_pos : Vec3{0, 0, 0}
-	l9.prev_pos       = ship.pos
-	l9.probed_once    = true
+	// If the player swept the laser onto a different world object, restart
+	// the learn buffer — it should only carry observations of one object so
+	// novelty-detection works.
+	if idx != l9.learn_target_wi {
+		l9_reset_learn_buffer()
+		l9.learn_target_wi = idx
+	}
+
+	// Hit-point delta is the right displacement for a rangefinder; if the
+	// buffer was just cleared, this is the first probe of a fresh episode
+	// and disp must be zero.
+	disp: Vec3
+	if l9.probed_once && l9.learn_count > 0 {
+		disp = hit - l9.prev_hit
+	}
+	l9.prev_hit    = hit
+	l9.probed_once = true
+
+	// Append to the rolling buffer BEFORE lm_step so we can also use it
+	// for the learning replay if novelty triggers.
+	l9_buffer_push(cmp, disp)
 
 	lm := &game.lms[0]
 	was_converged := lm.converged
 	diag_pre(game)
 	lm_step(lm, cmp, disp, &game.model_db)
 	diag_post(game)
+
 	if lm.converged && !was_converged {
-		l9_record_id(game, lm)
+		// Whatever the LM converged on is what we report — even if it's
+		// wrong. Mis-recognition of similar archetypes is one of Monty's
+		// real failure modes (rate-based novelty can be bypassed when
+		// two graphs overlap enough on features to keep evidence growth
+		// healthy), and the demo should expose that rather than paper
+		// over it with a ground-truth check. The halo will end up in the
+		// LM's believed archetype colour so mis-classifications are
+		// visible at a glance.
+		l9_record_id(game, lm, idx)
+		l9_reset_learn_buffer()
+	} else if !lm.converged && l9.learn_count >= NOVELTY_MIN_PROBES {
+		// Evidence growth rate stayed too low across enough probes → novelty.
+		// Commit unconditionally — the LM has no ground-truth way to know
+		// whether this is genuinely a new type or just a known one it
+		// failed to recognise (a real Monty limitation, no consolidation).
+		max_evid := lm_max_active_evidence(lm)
+		rate := max_evid / f32(l9.learn_count)
+		if rate < NOVELTY_RATE_MAX && l9.learn_count >= NOVELTY_LEARN_NODES {
+			l9_commit_new_pattern(game)
+		}
 	}
+
 	log_append({t = now, valid = true, cell_idx = -1, obj_name = obj.name, cmp = cmp})
 	maybe_self_reset(game)
 }
@@ -344,7 +628,10 @@ l9_pulse_array :: proc(game: ^Game_State) {
 			confidence  = 1.0,
 		}
 		valid[i] = true
-		disps[i] = Vec3{0, 0, 0}
+		// Hit-point delta is the right displacement for a rangefinder.
+		disps[i] = l9.cell_probed_once[i] ? hit - l9.cell_prev_hit[i] : Vec3{0, 0, 0}
+		l9.cell_prev_hit[i]    = hit
+		l9.cell_probed_once[i] = true
 		log_append({t = now, valid = true, cell_idx = i, obj_name = obj.name, cmp = cmps[i]})
 	}
 
@@ -367,23 +654,66 @@ l9_pulse_array :: proc(game: ^Game_State) {
 		if !ok do continue
 		for receiver in 0..<SANDBOX_PATCH_CELLS {
 			if receiver == sender do continue
+			if !valid[receiver] do continue
 			if game.lms[receiver].converged do continue
-			offset := l9.cell_origins[receiver] - l9.cell_origins[sender]
+			// Contact-point offset, not cell-origin offset. See lm_receive_vote.
+			offset := l9.cell_hit_pos[receiver] - l9.cell_hit_pos[sender]
 			lm_receive_vote(&game.lms[receiver], vote, offset, &game.model_db)
 		}
 	}
 
-	// Record IDs on freshly converged LMs (de-dup: at most one per archetype per pulse)
-	recorded_arch: [len(proc_archetypes)]bool
+	// Record IDs on freshly converged LMs. De-dup by pattern_id (model_db
+	// index) — multiple cells often converge on the same graph in one
+	// pulse and we only want one record per graph per pulse.
+	recorded_pat: [MAX_OBJECTS]bool
 	for i in 0..<SANDBOX_PATCH_CELLS {
 		lm := &game.lms[i]
-		if lm.converged && !prev_converged[i] && lm.winner_obj >= 0 &&
-		   lm.winner_obj < game.model_db.object_count {
-			name := game.model_db.objects[lm.winner_obj].name
-			a := proc_archetype_index(name)
-			if a >= 0 && !recorded_arch[a] {
-				recorded_arch[a] = true
-				l9.id_count[a] += 1
+		if !lm.converged || prev_converged[i] do continue
+		if lm.winner_obj < 0 || lm.winner_obj >= game.model_db.object_count do continue
+		if recorded_pat[lm.winner_obj] do continue
+		recorded_pat[lm.winner_obj] = true
+		if l9.cell_hits[i] {
+			l9.last_cmp_world = l9.cell_hit_pos[i]
+			l9.last_cmp_valid = true
+		}
+		// Look up which world object this cell hit so we mark the right cell
+		probed_wi := -1
+		if l9.cell_hits[i] {
+			best_d: f32 = 1e9
+			for oi in 0..<len(game.world.objects) {
+				d := linalg.distance(game.world.objects[oi].pos, l9.cell_hit_pos[i])
+				if d < best_d { best_d = d; probed_wi = oi }
+			}
+		}
+		// Whatever the LM converged on is reported, even if wrong.
+		l9_record_id(game, lm, probed_wi)
+	}
+
+	// LIVE LEARNING in array mode — uses cell 0 as the learn-buffer source
+	// (the same LM the deep-view HUD watches). If cell 0 hit something and
+	// its LM stays below the novelty threshold over enough probes, we
+	// commit a fresh graph for that archetype just like single-laser mode.
+	if valid[0] {
+		// Nearest world object to cell 0's hit — used to attribute the buffer
+		hit_obj_idx := -1
+		best_d: f32 = 1e9
+		ref := l9.cell_hit_pos[0]
+		for oi in 0..<len(game.world.objects) {
+			d := linalg.distance(game.world.objects[oi].pos, ref)
+			if d < best_d { best_d = d; hit_obj_idx = oi }
+		}
+		if hit_obj_idx != l9.learn_target_wi {
+			l9_reset_learn_buffer()
+			l9.learn_target_wi = hit_obj_idx
+		}
+		l9_buffer_push(cmps[0], disps[0])
+
+		lm0 := &game.lms[0]
+		if !lm0.converged && l9.learn_count >= NOVELTY_MIN_PROBES && hit_obj_idx >= 0 {
+			max_evid := lm_max_active_evidence(lm0)
+			rate := max_evid / f32(l9.learn_count)
+			if rate < NOVELTY_RATE_MAX && l9.learn_count >= NOVELTY_LEARN_NODES {
+				l9_commit_new_pattern(game)
 			}
 		}
 	}
@@ -398,12 +728,14 @@ l9_reset_lms :: proc(game: ^Game_State) {
 		lm_start_inference(&game.lms[i], &game.model_db)
 	}
 	l9.probed_once       = false
+	for i in 0..<SANDBOX_PATCH_CELLS do l9.cell_probed_once[i] = false
 	l9.last_active       = 0
 	l9.pruned_last_step  = 0
 	l9.mlh_evidence_prev = 0
 	l9.converge_time     = 0
 	l9.converge_steps    = 0
 	l9.confusion_streak  = 0
+	l9_reset_learn_buffer()
 }
 
 l9_sandbox_update :: proc(game: ^Game_State, dt: f32) {
@@ -411,16 +743,36 @@ l9_sandbox_update :: proc(game: ^Game_State, dt: f32) {
 	if rl.IsKeyPressed(.H)      { l9.show_help = !l9.show_help }
 	if rl.IsKeyPressed(.N) {
 		l9_reset_lms(game)
+		l9.post_converge_timer = 0
 		l9.message       = "NEW EPISODE — LMs reset (identification counts kept)."
+		l9.message_timer = 2.5
+	}
+	if rl.IsKeyPressed(.C) {
+		l9.auto_cycle_enabled = !l9.auto_cycle_enabled
+		if !l9.auto_cycle_enabled do l9.post_converge_timer = 0
+		mm: cstring = "AUTO-CYCLE ON — converged LMs reset after a brief hold"
+		if !l9.auto_cycle_enabled do mm = "AUTO-CYCLE OFF — manual [N] to reset"
+		l9.message       = mm
 		l9.message_timer = 2.5
 	}
 	if rl.IsKeyPressed(.TAB) {
 		l9.mode = l9.mode == .Single_Laser ? .Optic_Array : .Single_Laser
 		l9_reset_lms(game)
+		l9.post_converge_timer = 0
 		mm: cstring = "SINGLE LASER mode"
 		if l9.mode == .Optic_Array do mm = "OPTIC ARRAY mode (9 LMs)"
 		l9.message       = mm
 		l9.message_timer = 2.0
+	}
+
+	// Auto-cycle: after the focus LM converges and the celebration hold
+	// elapses, reset so the player can identify the next thing.
+	if l9.post_converge_timer > 0 {
+		l9.post_converge_timer -= dt
+		if l9.post_converge_timer <= 0 {
+			l9_reset_lms(game)
+			l9.post_converge_timer = 0
+		}
 	}
 
 	ship := &game.ship
@@ -454,16 +806,155 @@ l9_sandbox_update :: proc(game: ^Game_State, dt: f32) {
 	game.camera.position = ship.pos + Vec3{0, 18, 0} - fwd * 12
 	game.camera.target   = ship.pos + fwd * 4
 
-	if l9.message_timer > 0 do l9.message_timer -= dt
+	if l9.message_timer  > 0 do l9.message_timer  -= dt
+	if l9.discovery_anim > 0 do l9.discovery_anim -= dt
 }
 
 // ── 3D draw ─────────────────────────────────────────────────────────────────
 
+// Halo color derived from a pattern_id (model_db index). Patterns get
+// evenly-spaced hues via the golden-ratio trick so neighbouring numbers
+// look distinct. The LM doesn't pick this — it's just a stable visual
+// tag for each graph it commits.
+@(private = "file")
+pattern_halo_color :: proc(pattern_id: int) -> Color {
+	if pattern_id < 0 do return Color{200, 200, 220, 255}
+	// Hue rotation by golden angle (~137.5°) keeps colours far apart
+	h := math.mod(f32(pattern_id) * 137.508, 360.0)
+	// HSV → RGB with S=0.7, V=0.95
+	c := f32(0.95) * 0.7
+	x := c * (1 - abs(math.mod(h / 60.0, 2.0) - 1))
+	m := f32(0.95) - c
+	r, g, b: f32
+	switch {
+	case h <  60: r, g, b = c, x, 0
+	case h < 120: r, g, b = x, c, 0
+	case h < 180: r, g, b = 0, c, x
+	case h < 240: r, g, b = 0, x, c
+	case h < 300: r, g, b = x, 0, c
+	case        : r, g, b = c, 0, x
+	}
+	return Color{u8((r + m) * 255), u8((g + m) * 255), u8((b + m) * 255), 255}
+}
+
+// Procedural dust-cloud render for an unknown object. Particle positions
+// are deterministic per (cell_x, cell_z) so the cloud doesn't shimmer
+// randomly each frame, but pulse gently with time.
+@(private = "file")
+draw_dust_cloud :: proc(obj: ^World_Object, is_aim_target: bool) {
+	t := f32(rl.GetTime())
+	seed := hash_2d(obj.cell_x, obj.cell_z)
+	r := obj.size.x
+	N :: 28
+
+	for i in 0..<N {
+		// Hash the index into the cell seed for stable but distinct angles
+		s := seed ~ u32(i) * 2654435761
+		s ~= s >> 13
+		s *= 0x5bd1e995
+		s ~= s >> 15
+
+		theta: f32 = f32(s & 0xFFFF) / 65535.0 * 2 * f32(math.PI)
+		phi:   f32 = f32((s >> 16) & 0xFFFF) / 65535.0 * f32(math.PI)
+		rad:   f32 = r * (0.6 + 0.5 * f32((s >> 8) & 0xFF) / 255.0)
+		// Gentle wobble — particles breathe
+		rad *= 1.0 + 0.08 * math.sin(t * 0.9 + f32(i) * 0.7)
+
+		p := obj.pos + Vec3{
+			rad * math.sin(phi) * math.cos(theta),
+			rad * math.cos(phi) * 0.7,
+			rad * math.sin(phi) * math.sin(theta),
+		}
+		alpha: u8 = is_aim_target ? 220 : 150
+		size: f32 = is_aim_target ? 0.10 : 0.075
+		rl.DrawSphere(p, size, Color{180, 200, 240, alpha})
+	}
+
+	// Faint outer envelope — gives sense of "something is here"
+	env_a: u8 = is_aim_target ? 60 : 30
+	rl.DrawSphereWires(obj.pos, r * 1.15, 6, 6, Color{120, 160, 200, env_a})
+}
+
 l9_sandbox_draw :: proc(game: ^Game_State) {
 	rl.BeginMode3D(game.camera)
-	world_draw(&game.world, true)
+	// Background grid only — we render objects ourselves so unknown vs
+	// learned types use different visuals.
+	world_draw(&game.world, false)
 	ship_draw(&game.ship)
 	ship_draw_trail(&game.ship)
+
+	// Where the laser is currently pointed — for highlighting the active
+	// dust cloud as the player aims.
+	fwd_aim := ship_forward(&game.ship)
+	aim_idx, _, _ := l9_raycast(&game.world, game.ship.pos, fwd_aim)
+
+	// Per-object rendering: full geometry ONLY if THIS specific instance
+	// has been individually scanned and recognised. The type being learned
+	// doesn't auto-reveal future instances — each one still has to be
+	// scanned (recognition just becomes faster once the LM has the graph).
+	for i in 0..<len(game.world.objects) {
+		obj := &game.world.objects[i]
+		ic_idx := l9_find_identified_cell(obj.cell_x, obj.cell_z)
+		instance_known := ic_idx >= 0
+
+		if instance_known {
+			// Geometry reveals what the object actually IS — the player
+			// needs to be able to see what they probed so they can spot
+			// mis-classifications. Halo, in contrast, reflects what the
+			// LM BELIEVED. When the two disagree, the player sees an
+			// authentic Monty mis-recognition: the shape is one thing
+			// but the halo colour is another.
+			c := Color{
+				u8(obj.material.color.x * 255),
+				u8(obj.material.color.y * 255),
+				u8(obj.material.color.z * 255),
+				255,
+			}
+			switch obj.kind {
+			case .Sphere:
+				rl.DrawSphere(obj.pos, obj.size.x, c)
+				rl.DrawSphereWires(obj.pos, obj.size.x, 8, 8, Color{255, 255, 255, 40})
+			case .Cube:
+				rl.DrawCube(obj.pos, obj.size.x, obj.size.y, obj.size.z, c)
+				rl.DrawCubeWires(obj.pos, obj.size.x, obj.size.y, obj.size.z, Color{255, 255, 255, 40})
+			case .Cylinder:
+				rl.DrawCylinder(obj.pos, obj.size.x, obj.size.x, obj.size.y, 12, c)
+			case .Torus, .LShape:
+				rl.DrawSphere(obj.pos, obj.size.x, c)
+			}
+
+			belief_pattern := l9.identified_cells[ic_idx].pattern_id
+			if belief_pattern >= 0 {
+				hc := pattern_halo_color(belief_pattern)
+				rl.DrawSphereWires(obj.pos, obj.size.x + 0.25, 8, 8,
+					Color{hc.r, hc.g, hc.b, 180})
+			}
+		} else {
+			draw_dust_cloud(obj, i == aim_idx)
+		}
+	}
+
+	// Celebration ring on the in-flight converged hold (if any)
+	if l9.post_converge_timer > 0 && l9.recent_ids_count > 0 {
+		idx := (l9.recent_ids_head - 1 + MAX_RECENT_IDS) % MAX_RECENT_IDS
+		r   := l9.recent_ids[idx]
+		if r.pattern_id >= 0 {
+			c := pattern_halo_color(r.pattern_id)
+			tt := 1 - (l9.post_converge_timer / POST_CONVERGE_HOLD)
+			pulse := 1 + 0.6 * tt
+			rl.DrawSphereWires(r.pos, 2.4 * pulse, 12, 12,
+				Color{c.r, c.g, c.b, u8((1 - tt * 0.5) * 220)})
+		}
+	}
+
+	// Discovery celebration — bright pulsing ring on a brand-new pattern
+	if l9.discovery_anim > 0 && l9.discovery_pattern >= 0 {
+		c := pattern_halo_color(l9.discovery_pattern)
+		tt := 1 - (l9.discovery_anim / 2.5)
+		pulse := 1 + tt * 1.8
+		rl.DrawSphereWires(l9.discovery_pos, 1.8 * pulse, 14, 14,
+			Color{c.r, c.g, c.b, u8((1 - tt) * 240)})
+	}
 
 	fwd := ship_forward(&game.ship)
 	switch l9.mode {
@@ -554,7 +1045,7 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 	}
 
 	// ── Top-left status ─────────────────────────────────────────────────
-	pw, ph: f32 = 320, 134
+	pw, ph: f32 = 320, 168
 	rl.DrawRectangle(10, 10, i32(pw), i32(ph), Color{0, 0, 0, 160})
 	rl.DrawRectangleLinesEx({10, 10, pw, ph}, 1, Color{60, 80, 120, 150})
 	rl.DrawText(mode_label, 20, 18, 16, mode_c)
@@ -567,6 +1058,19 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 		20, 96, 13, Color{200, 220, 240, 220})
 	rl.DrawText(fmt.ctprintf("pulses total: %d", l9.pulses_total),
 		20, 114, 13, Color{200, 220, 240, 220})
+
+	// Auto-cycle indicator
+	cycle_label: cstring = "auto-cycle: ON"
+	cycle_c := Color{120, 255, 160, 220}
+	if !l9.auto_cycle_enabled {
+		cycle_label = "auto-cycle: OFF  [C] toggle"
+		cycle_c = Color{200, 180, 120, 220}
+	} else if l9.post_converge_timer > 0 {
+		cycle_label = fmt.ctprintf("auto-cycle: resetting in %.1fs", l9.post_converge_timer)
+		cycle_c = Color{255, 220, 100, 230}
+	}
+	rl.DrawText(cycle_label, 20, 132, 13, cycle_c)
+	rl.DrawText("[C] toggle auto-cycle", 20, 150, 11, Color{120, 140, 170, 180})
 
 	// ── LM 0 DEEP VIEW (left column, below status) ──────────────────────
 	dv_x: f32 = 10
@@ -711,6 +1215,27 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 		my += 16
 	}
 
+	// Novelty signal — evidence-growth rate vs the cut-off that triggers
+	// learning. Below the threshold means "the LM is stuck and a fresh
+	// graph should be committed for this object."
+	if l9.learn_count > 0 {
+		max_evid := lm_max_active_evidence(lm0)
+		rate := max_evid / f32(l9.learn_count)
+		rate_c := Color{200, 220, 240, 220}
+		hint:  cstring = "rate ok (recognising)"
+		if l9.learn_count >= NOVELTY_MIN_PROBES && rate < NOVELTY_RATE_MAX {
+			rate_c = Color{255, 200, 120, 230}
+			hint   = "rate LOW — novelty pending"
+		} else if rate < NOVELTY_RATE_MAX {
+			rate_c = Color{200, 200, 220, 200}
+			hint   = "rate low — need more probes"
+		}
+		rl.DrawText(fmt.ctprintf("novelty rate: %.2f / probe  (cut %.2f, buf %d/%d)  %s",
+				rate, NOVELTY_RATE_MAX, l9.learn_count, LEARN_BUFFER_SIZE, hint),
+			i32(dv_x) + 10, my, 12, rate_c)
+		my += 16
+	}
+
 	// Last step diagnostics for the MLH
 	if lm0.mlh_idx >= 0 && lm0.mlh_idx < lm0.hyp_count && lm0.step_count > 0 {
 		info := &lm0.step_info[lm0.mlh_idx]
@@ -727,30 +1252,52 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 		}
 	}
 
-	// ── Right-side archetype tally ──────────────────────────────────────
+	// ── Right-side patterns panel ───────────────────────────────────────
+	// Lists every graph committed by the LM. Empty at start, grows by one
+	// each time novelty fires. Multiple entries can correspond to the same
+	// true archetype if the LM failed to recognise an instance as a known
+	// pattern — that's real Monty behaviour (no consolidation step).
+	pattern_total := db.object_count
+
 	right_x := sw - 360
 	right_y: f32 = 10
 	right_w: f32 = 350
-	right_h: f32 = 38 + f32(len(proc_archetypes)) * 24
+	max_rows := 16
+	displayed := min(pattern_total, max_rows)
+	if displayed < 4 do displayed = 4
+	right_h: f32 = 50 + f32(displayed) * 20
 	rl.DrawRectangle(i32(right_x), i32(right_y), i32(right_w), i32(right_h),
 		Color{0, 0, 0, 170})
 	rl.DrawRectangleLinesEx({right_x, right_y, right_w, right_h}, 1,
 		Color{100, 160, 220, 180})
-	rl.DrawText("ARCHETYPES IDENTIFIED", i32(right_x) + 10, i32(right_y) + 8, 13,
-		Color{120, 180, 255, 220})
-	for ai in 0..<len(proc_archetypes) {
-		arch := &proc_archetypes[ai]
-		y := i32(right_y) + 30 + i32(ai) * 24
-		c := Color{u8(arch.material.color.x * 255),
-		           u8(arch.material.color.y * 255),
-		           u8(arch.material.color.z * 255), 255}
-		rl.DrawRectangle(i32(right_x) + 10, y + 2, 18, 14, c)
-		rl.DrawRectangleLines(i32(right_x) + 10, y + 2, 18, 14, Color{180, 200, 230, 200})
-		rl.DrawText(arch.name, i32(right_x) + 34, y + 2, 13,
-			l9.id_count[ai] > 0 ? Color{220, 240, 255, 230} : Color{140, 160, 190, 200})
-		count_text: cstring = fmt.ctprintf("× %d", l9.id_count[ai])
-		count_c := l9.id_count[ai] > 0 ? Color{120, 255, 160, 230} : Color{100, 110, 130, 180}
-		rl.DrawText(count_text, i32(right_x) + i32(right_w) - 70, y + 2, 13, count_c)
+	rl.DrawText(fmt.ctprintf("COMMITTED PATTERNS: %d", pattern_total),
+		i32(right_x) + 10, i32(right_y) + 8, 13, Color{120, 180, 255, 220})
+	rl.DrawText("(graphs the LM has built — names are pure counters)",
+		i32(right_x) + 10, i32(right_y) + 26, 11, Color{140, 160, 190, 180})
+
+	if pattern_total == 0 {
+		rl.DrawText("  — nothing yet —", i32(right_x) + 10, i32(right_y) + 48, 13,
+			Color{140, 160, 190, 200})
+	} else {
+		row := 0
+		for pi in 0..<db.object_count {
+			if row >= max_rows do break
+			y := i32(right_y) + 48 + i32(row) * 20
+			c := pattern_halo_color(pi)
+			rl.DrawRectangle(i32(right_x) + 10, y + 2, 14, 12, c)
+			rl.DrawText(db.objects[pi].name, i32(right_x) + 30, y + 2, 12,
+				Color{220, 240, 255, 230})
+			cnt := l9.id_count[pi]
+			count_text := fmt.ctprintf("× %d", cnt)
+			count_c := cnt > 0 ? Color{120, 255, 160, 230} : Color{160, 180, 200, 200}
+			rl.DrawText(count_text, i32(right_x) + i32(right_w) - 60, y + 2, 12, count_c)
+			row += 1
+		}
+		if pattern_total > max_rows {
+			rl.DrawText(fmt.ctprintf("(+%d more)", pattern_total - max_rows),
+				i32(right_x) + 10, i32(right_y) + 48 + i32(max_rows) * 20, 11,
+				Color{160, 180, 200, 180})
+		}
 	}
 
 	// ── Right-side LM stats (under tally) ───────────────────────────────
@@ -779,6 +1326,42 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 	}
 	// Convergence pills (inline) for LM 0
 	lm_draw_convergence_inline(lm0, i32(right_x) + 10, i32(st_y) + 92)
+
+	// ── Recent identifications ticker ───────────────────────────────────
+	ri_y := st_y + st_h + 10
+	ri_h: f32 = 30 + f32(MAX_RECENT_IDS) * 22
+	rl.DrawRectangle(i32(right_x), i32(ri_y), i32(right_w), i32(ri_h),
+		Color{0, 0, 0, 170})
+	rl.DrawRectangleLinesEx({right_x, ri_y, right_w, ri_h}, 1,
+		Color{100, 220, 160, 180})
+	rl.DrawText("RECENT IDS  (newest first)", i32(right_x) + 10, i32(ri_y) + 8, 13,
+		Color{140, 240, 180, 230})
+	now_t := f32(rl.GetTime())
+	for i in 0..<l9.recent_ids_count {
+		idx := (l9.recent_ids_head - 1 - i + MAX_RECENT_IDS) % MAX_RECENT_IDS
+		r   := &l9.recent_ids[idx]
+		if r.pattern_id < 0 || r.pattern_id >= db.object_count do continue
+		y := i32(ri_y) + 30 + i32(i) * 22
+		c := pattern_halo_color(r.pattern_id)
+		rl.DrawRectangle(i32(right_x) + 10, y + 3, 12, 12, c)
+		rl.DrawText(db.objects[r.pattern_id].name,
+			i32(right_x) + 30, y + 2, 13, Color{220, 240, 255, 230})
+		dt_ago := now_t - r.t
+		ago_s: cstring = fmt.ctprintf("%.1fs ago", dt_ago)
+		rl.DrawText(ago_s, i32(right_x) + i32(right_w) - 110, y + 2, 12,
+			Color{160, 180, 210, 180})
+		rl.DrawText(fmt.ctprintf("(%+.0f,%+.0f)", r.pos.x, r.pos.z),
+			i32(right_x) + 170, y + 2, 11, Color{140, 160, 190, 180})
+	}
+	if l9.recent_ids_count == 0 {
+		rl.DrawText("  (pulse an object to start the stream)",
+			i32(right_x) + 10, i32(ri_y) + 36, 12, Color{140, 160, 190, 180})
+	}
+
+	// Identified-instance counter (bottom strip overlay)
+	mapped_text := fmt.ctprintf("instances mapped: %d", l9.identified_count)
+	rl.DrawText(mapped_text, i32(right_x) + 10, i32(ri_y) + i32(ri_h) - 18, 11,
+		Color{160, 200, 230, 200})
 
 	// ── CMP MESSAGE LOG (bottom strip) ──────────────────────────────────
 	log_h: f32 = 130
@@ -842,7 +1425,7 @@ l9_sandbox_draw_ui :: proc(game: ^Game_State) {
 	}
 
 	if l9.show_help {
-		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto  [TAB] Mode  [N] New episode  [H] Help  [ESC] Back",
+		rl.DrawText("[WASD] Fly  [F] Pulse  [SPACE] Auto  [TAB] Mode  [N] Reset  [C] Auto-cycle  [H] Help  [ESC] Back",
 			10, i32(sh) - 28, 13, Color{80, 100, 140, 150})
 	}
 

@@ -46,9 +46,18 @@ Honest authenticity gaps in this Odin implementation:
 
   2. BUFFER / SHORT-TERM MEMORY. Real Monty has an explicit observation
      buffer during inference that can be committed to long-term graph
-     memory after recognition — supporting CONTINUOUS LEARNING. We
-     commit immediately during the LEARN phase and discard observations
-     in INFER mode. No new objects can be learned during inference.
+     memory after recognition. The earlier levels mirror this only
+     partially — they commit during the LEARN phase and discard
+     observations in INFER mode. The SANDBOX level closes the gap: the
+     focus LM keeps a rolling buffer of recent CMPs, detects novelty
+     when MLH evidence rate stays low, and replays the buffer through
+     lm_learn_step to commit a brand-new graph mid-flight. Continuous
+     learning is live there. The committed graph is named "Pattern-N"
+     (counter only — the LM has no ground-truth knowledge of what it
+     just learned), and there is no consolidation step: if the LM
+     fails to recognise a second instance of the same true type, it
+     will commit a SECOND graph for it. That duplication is a real
+     Monty failure mode preserved here rather than papered over.
 
   3. EVIDENCE UPDATE THRESHOLD. Real Monty's evidence_update_threshold
      (configurable: mean / median / X% of MLH / all) decides which

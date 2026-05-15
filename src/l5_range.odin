@@ -133,6 +133,15 @@ l5_register_pulse :: proc(game: ^Game_State, wobj_idx: int, hit, normal: Vec3, p
 		},
 		confidence  = 1.0,
 	}
+
+	// Displacement is the change in HIT POINT, not the change in ship position.
+	// The rangefinder sensor is far from the surface, so even tiny camera tilts
+	// swing the hit point much more than the origin moves — using ship.pos here
+	// would feed the LM bogus motion and poison the right hypothesis.
+	disp: Vec3 = {0, 0, 0}
+	if l5.last_cmp_valid do disp = hit - l5.last_cmp_world
+	_ = prev_ship_pos
+
 	l5.last_cmp       = cmp
 	l5.last_cmp_obj   = obj.name
 	l5.last_cmp_world = hit
@@ -140,8 +149,6 @@ l5_register_pulse :: proc(game: ^Game_State, wobj_idx: int, hit, normal: Vec3, p
 	l5.pulse_anim     = 1.0
 	l5.current_wobj   = wobj_idx  // tracked for "which object got the last pulse" — never used to reset
 
-	disp: Vec3 = {0, 0, 0}
-	if l5.probes_current > 0 do disp = game.ship.pos - prev_ship_pos
 	lm_step(&game.lms[0], cmp, disp, &game.model_db)
 	l5.probes_current += 1
 }
@@ -281,6 +288,7 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 		lm_start_inference(&game.lms[0], &game.model_db)
 		l5.probes_current = 0
 		l5.hint_valid     = false
+		l5.last_cmp_valid = false  // next probe seeds displacement with zero
 		l5.message        = "NEW EPISODE — hypothesis space reset."
 		l5.message_timer  = 2
 	}
@@ -307,7 +315,11 @@ l5_range_update :: proc(game: ^Game_State, dt: f32) {
 		if lm.winner_obj < len(l5.identified) && !l5.identified[lm.winner_obj] {
 			l5.identified[lm.winner_obj] = true
 			l5.unique_ids += 1
-			name := game.world.objects[lm.winner_obj].name
+			// Use the LM's own model_db name — not world.objects[winner_obj].name,
+			// which only happens to give the same answer because seed_world_objects
+			// builds the db in the same order as the world array. Conceptually
+			// we trust the LM's decision, not a world-array coincidence.
+			name := game.model_db.objects[lm.winner_obj].name
 			l5.message = fmt.ctprintf("Identified: %s in %d probes  (%d/%d)\n[N] for new episode, then aim at another object.",
 				name, l5.probes_current, l5.unique_ids, RANGE_TARGETS_TO_WIN)
 			l5.message_timer = 5
