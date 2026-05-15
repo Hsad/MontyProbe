@@ -1,3 +1,12 @@
+
+Ruthlessly vibe coded with Opus4.7
+Cranking out a self tutorial game to get a better grasp of Monty.
+Did the trick, but overall not a great usecase example.
+Uniform spheres of one material maybe isn't the best example of freature at location detection.
+
+
+
+
 # Monty: Evolving Sensors
 
 An interactive game that teaches Numenta's **Thousand Brains Theory** and the
