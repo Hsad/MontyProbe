@@ -79,6 +79,54 @@ The game loop is:
 
 There are no living crew. The lights are on and nobody is home.
 
+### Timing — turn-based, continuous game-time world *(open — re-discuss)*
+
+Current leaning, **not final**: player input is **turn-based**
+(each player action advances game-time by some amount), but the
+world's dynamics — eye drift, sand drift, storm phases, rotation-
+rate updates — are *continuous in game-time*. Roguelike-style:
+press an action, the world ticks forward, everything advances
+incrementally.
+
+Arguments for: each Monty step stays discrete and observable
+(player sees hypothesis evolution between actions, no realtime
+blur), implementation is cheaper than real-time, the late-game
+time-skipping below drops in naturally.
+
+Arguments against: storms feel less visceral than realtime,
+mothership ear's "always listening" loses some of its temporal
+texture, watching the eye drift in real time has its own appeal.
+
+To revisit before locking in.
+
+Late-game **time-skipping** (assuming turn-based holds): once
+enough automation is unlocked, the player can advance N turns at
+once with the LM and rovers executing autonomously. Manual-to-
+automatic delegation extends naturally into a temporal axis — you
+stop pressing each turn, you press "advance 10 turns of current
+plan."
+
+**Time-warp for routine travel.** Rover crossings through fully-
+known territory would be tedious to watch step by step. Time-warp
+runs the simulation fast during routine travel and auto-pauses on
+novel events: storm warning, unrecognised structure, hypothesis
+funnel collapsing, beacon dropping out, rover stuck. Dwarf-Fortress
+/ Rimworld pacing — time runs fast when things are routine, slows
+when things are interesting. Player attention scales with
+information density.
+
+### Eye drift speed scales over the campaign
+
+Early-game eye drift is **very slow**. The player has time to build
+something that feels like a home base inside the eye before the
+world starts moving meaningfully. As the campaign progresses the
+drift increases, and by mid-late game the eye has wandered far
+enough that the home base is now in the dust (and potentially
+becoming buried — see Sand Burial below).
+
+This pacing is the structural setup for the slow-drift home-base-
+becomes-buried arc.
+
 ---
 
 ## World — The Dust Plain and the Eye
@@ -185,34 +233,117 @@ trade-off falls out of the world model.
 ### Ring rotation rates are learnable and drift
 
 Each radial band of dust has its own rotation rate. The rates
-**drift slowly once Monty starts learning them** — the ear-LM has
-to predict the current rate from the band's acoustic tone rather
-than memorise a fixed value. The atlas's predictions about lateral
-drift per hop are only as good as the ear-LM's current rate
-estimate.
+**drift slowly once Monty starts learning them** — Monty has to
+predict the current rate from observable cues rather than memorise
+a fixed value.
+
+Two independent channels for learning the rate:
+
+1. **Mothership ear-LM** — passive, indirect. Infers rate from
+   acoustic tone of the band's rumble.
+2. **Flying probe + ground sensor** — active, direct. The probe
+   uses atlas-recognised ground features as a velocity reference:
+   ground is fixed, probe is drifting, drift velocity = the
+   rotational current at that altitude. Probe reports back.
+
+The two channels cross-validate. Redundant modalities converging
+on the same world dynamic via lateral voting — very Monty. Flying
+into the storm gains scientific value beyond just resource raids.
 
 **Electric storms may emerge when one ring counter-rotates against
 another fast enough.** The storm's electrical phase is therefore a
 consequence of the ring dynamics, not a designer-imposed event.
 
-### Crawlers — fine-grained surface navigation
+### Crawlers — modular rover platform
 
 Flight gets you into the neighbourhood. To do *precise* work —
 reach a specific depot tile, walk a structure perimeter, manipulate
-a specific feature — you deploy a slow ground crawler.
+a specific feature — you deploy a slow ground rover.
 
-- A crawler is heavy, slow, locally-controllable (precise WASD
-  movement on the surface).
-- Crawlers carry their own short-range sensors; their LM data
-  syncs with the mothership when they get back into eye range or
-  when their parent probe relays.
-- Crawlers can be **tethered to a parent flyer probe**. Tether is
+The rover is a **modular platform**: same base chassis, outfitted
+for the job. Crane, excavator, transport bed, sensor suite, etc. —
+it is whatever it's equipped to be. Smaller mouse-drones exist for
+rapid scouting, and bigger ones for heavy work, but the modular
+mid-size rover is the workhorse.
+
+- Rovers are heavy, slow, locally-controllable (WASD: turn +
+  forward / backward, world rotates around the character).
+- Rovers carry their own short-range sensors; their LM data syncs
+  with the mothership when they get back into eye range or when
+  their parent flyer probe relays.
+- Rovers can be **tethered to a parent flyer probe**. Tether is
   *local only* — gives you fine-grained relative position between
-  crawler and probe — and does **not** give you any absolute
+  rover and probe — and does **not** give you any absolute
   position. The "you're lost" core is preserved.
-- Crawlers do not deploy persistent beacons. There is no way to
-  place a permanent positional anchor in the world. Anything
-  bypassing recognition is a cheat we don't take.
+- Rovers can place short-range beacons (see below); these
+  *supplement* recognition rather than replace it.
+
+### Short-range beacons — supplement Monty, never replace it
+
+Beacons are physical objects with manufacturing cost. Players can
+place them freely; the cost regulates abuse. Long breadcrumb trails
+burn real budget that could have gone to rovers or refineries.
+
+The principle: **a beacon answers "where is this thing?" Monty
+answers "what is this thing?"** Without recognition, a beacon is a
+faint glow with no meaning.
+
+Concrete rules:
+
+- **Range proportional to clear air.** Full range in the eye; tens
+  of metres at the eye fringe; tile-or-two in heavy dust. Beacons
+  reach far where you can already see; they don't help in the dust
+  where Monty matters.
+- **Electric storms kill them all.** Player-placed and ancient
+  alike. When the beacon network goes silent, atlas-only
+  navigation is what's left.
+- **Tied to atlas content.** A beacon means "near Foundry-3" only
+  because the placer recognised Foundry-3 when dropping it. A
+  beacon you placed while lost in the dust is just a thing you
+  dropped somewhere.
+- **Limited supply early, manufacturable late.** Early game,
+  beacons are raided from ghost-town stock — scarce, used
+  strategically. Late game, Tier 1 manufacturing produces more, but
+  they compete with everything else in the parts budget.
+- **Reclaimable.** Pick up unused beacons to recover cost.
+
+### Building-emitted ancient beacons
+
+Ghost-town structures broadcast low-power signals on the same
+channel as player beacons — emergency systems still running after
+the civilisation left. A **passive RF direction-finder** on probes
+or the mothership picks them up at long range:
+
+- *"Something is beaconing southwest, faint signal."*
+- Player flies that direction; eventually close enough for atlas
+  recognition to identify what's there
+- The beacon points; recognition names
+- Dust attenuates RF, so range is environmental
+- Electric storms silence them too
+
+This gives early-game city-finding a directional pull instead of
+pure random exploration, without bypassing the recognition step.
+*Pattern recognition* of beacon pulse signatures is a later
+unlock — see Cortical Columns below.
+
+### Truck navigation — Monty-based, IMU fallback
+
+Late-game cargo trucks (transport-outfitted rovers) need to make
+round trips between mines, refineries, factories, and the
+mothership. Ideal mode: **trucks navigate via Monty**, using their
+own atlas of recognised ground features to self-drive between known
+endpoints. The atlas needs to cover the ground path, not just the
+endpoints.
+
+IMU dead-reckoning is the fallback for preset point-to-point routes
+where the atlas hasn't been built up yet. Trade-off: IMUs get
+**scrambled by electrical storms**, so trucks running on IMUs
+during an electric phase stop or get lost. Trucks running on Monty
+keep going as long as they can recognise terrain.
+
+**Lost trucks** become a parallel of lost probes: scattered through
+the dust, atlas-recoverable, and the player has incentive to invest
+in Monty-aware trucks so this happens less.
 
 The architecture splits movement into two cleanly different jobs:
 
@@ -254,20 +385,43 @@ traverse a surface slowly with high resolution. Ears receive
 passively and decode patterns *over time* rather than across
 *space*.
 
-### Sensor modalities — still in design space
+### Sensor modalities and unlock progression
 
-The exact list of sensor modalities is **not committed**. We've
-been discussing candidates (optical, acoustic/sonar, thermal,
-radiation, moisture, range-finder sweep, thumper-and-receivers,
-etc.) but the firm selection is deferred to a dedicated sensor-
-design discussion. Sensor range also varies by sensor type
-(geology = single tile, local sonar = adjacent tiles, etc.) and
-needs its own pass.
+The campaign unlocks sensors roughly in this order. Earlier sensors
+are simpler / shorter-range; later ones reveal things invisible to
+the rest.
 
-Cross-modal recognition is *learned*, not given. Each modality's
-LM commits its own graphs in its own feature space. Binding across
-modalities is a separate consolidation step (see Cross-Modal
-Binding).
+| Tier | Sensor | Operator | Output shape | Pedagogical job |
+|---|---|---|---|---|
+| L1 | **Bump** | Rover | Single bit (collision) per attempted move | Monty from one bit per position |
+| L1 | **Mothership ear** (audio) | Mothership | Temporal stream | Temporal-axis LM (weather) |
+| L2 | **Geo probe** | Rover | Material code on tile you're on | Sub-surface sensing; can't see habs, can see landing pads / strata |
+| L3 | **Chemical sniffer** | Rover | Chemical signature on own tile | Find fuel depots — recognition gets economic teeth |
+| L3/L4 | **Sonar (range 1)** | Rover | Adjacent-tile geometric ping | First non-contact spatial sensor |
+| L4 | **Scalar colour** | Drone | One averaged colour per scan | Feature vectors beyond binary |
+| L5 | **Colour array** (2×2 / 3×3) | Drone | NxN grid of colours | Resolution scaling on same modality |
+| L5 | **Thermal IR** | Drone or rover | Heat reading | Active vs dormant distinction; cross-modal binding |
+| L6 | **Magnetometer / GPR** | Rover | Magnetic / subsurface signature | Buried structures revealed; mineral deposit location |
+| L7 | **Radiation Geiger** | Rover | Scalar count rate | Modality-exclusive distinction (shielded labs) |
+| L7 | **FLIR camera** | Drone | Array-thermal | Resolution scaling on thermal |
+| L7 | **Ground vibration → Thumper network** | Rover (passive → multi-rover active) | Seismic response | Distributed lateral voting at the sensor level |
+
+Sensor range varies by sensor type (geo probe = own tile, sonar
+upgrades extend range, etc.). Some sensors are direct upgrades
+along the same modality (sonar-1 → sonar-2 → sonar-3 by range;
+scalar colour → colour array → FLIR by resolution).
+
+**Parallelism vs richness as a strategic choice.** At fixed
+fabrication budget, the player can field either:
+
+- N drones each with a scalar sensor → N parallel observation
+  streams with lateral voting across them, wider spatial coverage
+- 1 drone with an NxN array sensor → 1 stream with richer per-
+  observation data, faster per-site convergence
+
+Both work; same Monty algorithm; different observational style.
+Late-game players who like spreading wide pick parallelism; players
+who like deep dives pick richness.
 
 ### The ear-LM is on the mothership
 
@@ -308,6 +462,161 @@ already know*.
 
 ---
 
+## Cortical Columns — The Monty Infrastructure
+
+Cortical columns (Monty modules) are a **transferable, attachable
+physical resource** the player manages. This directly reifies the
+Thousand Brains thesis: cortical columns are general-purpose
+learning units; the same column architecture works on any input.
+The player feels the algorithm's generality by literally moving
+columns between systems and watching them learn new modalities.
+
+### What a column is
+
+A small biological-on-chip neural tissue unit. Each column is one
+Monty Learning Module — has hypothesis population, atlas of
+committed graphs, evidence-update machinery. Columns are *physical
+objects* the player accumulates, installs, transfers, and clones.
+
+### Where columns come from
+
+- **Starter kit.** Player begins with a small handful (one or two
+  attached, maybe a couple of spares).
+- **Recovered probes.** Rarely, a recovered probe carries a column
+  — often pre-trained on whatever sensor it was attached to. First
+  one typically found on a recovered probe in the early game.
+- **Mothership bioreactor.** Slowly grows new columns from neural-
+  tissue substrate. Needs **food slurry** (ingredients sourced from
+  atlas-located mineral deposits + power). Growth rate is the
+  primary regulator on column abundance; accelerable with
+  investment (more power, more substrate, eventually lab-tuned
+  mass production).
+- **Tier-1 manufacturing.** Late-game factories can produce columns
+  alongside other components, contingent on lab blueprints.
+
+### Attachment
+
+A column plugs into one of:
+
+- A **raw sensor stream** → recognises tier-0 features (tiles,
+  sounds, RF pulses, etc.)
+- **Another column's output stream** → recognises one tier up
+- (Speculatively) An **action / decision stream** → enables the
+  speculative reference-frame tiers (state-transition,
+  theory-of-mind)
+
+Hierarchical recognition is *literally stacking columns*. T1
+recognition = column on a sensor; T2 recognition = column on T1's
+output; T3 = column on T2's output. Column scarcity directly
+constrains atlas depth.
+
+The player UI shows explicit attachment slots — a panel listing
+each sensor and column output stream, with the columns currently
+attached. Drag-and-drop to move.
+
+### Reconfiguration and the heterogeneous atlas
+
+Atlases persist on swap — they are *not* deleted. A column's
+graphs stay in its memory across reconfigurations:
+
+- **Atlas accumulates across all attachments.** Every feature space
+  the column has ever been attached to contributes graphs.
+- **Only graphs in the currently-attached feature space can match.**
+  Other graphs sit dormant.
+- **Swap back → previously-trained graphs become active again.**
+- **Saturation is the natural cost.** Each column has finite graph
+  capacity. Using one across multiple sensors fills it up faster;
+  specialised columns (single sensor) stay clean longer.
+- **Hard wipe is an explicit player action** — separate from swap.
+
+Whether you attach two streams *simultaneously* or swap between
+them *sequentially*, the column ends up with more graph data than
+a specialised column would. Both saturate earlier. Both are worse
+than two separate columns + cross-modal binding, which is the
+canonical architecture. The player is allowed to try the
+suboptimal arrangements as a learning moment — feeling the
+algorithm's preferences directly.
+
+### Cloning
+
+Columns can be cloned at a research lab:
+
+- **Labs only.** Lab reads the source column's atlas, instantiates
+  it on a fresh column.
+- **Slow.** Takes turns to complete.
+- **Source survives.** Cloning is non-destructive — original
+  column is untouched.
+- **Material cost.** Substrate consumed per clone.
+
+This unlocks **mass-producing trained columns** for the late-game
+ant-colony swarm: train one column carefully, clone it to every
+rover, instant fleet knowledge inheritance. Atlas-as-supply-chain
+deepens — losing the lab loses your cloning capability.
+
+### Distribution architecture — where the column physically lives
+
+Columns are physical hardware on a specific platform. The platform
+determines what the column has access to.
+
+- **Mothership-mounted column.** Safe, broad atlas band along the
+  storm path, ear-LM lives here by default.
+- **Hopper-mounted column.** Forward cortex for rovers operating
+  nearby. The hopper can act as a *local brain* for dumb-terminal
+  rovers via radio.
+- **Rover-mounted column.** Fully autonomous rover — its own
+  cortex on board. Doesn't need radio to make sense of its input.
+
+Early-game rovers are typically **dumb terminals**: they transmit
+sensor data back to a column on the parent hopper or mothership,
+which does the inference and sends back commands. Late game,
+column abundance lets you put one on each rover for true autonomy.
+The mid-game transition is a real capability moment.
+
+### Radio bandwidth scales with power allocation
+
+Sensor data flowing back to a parent column consumes radio
+bandwidth. The radio link has **32 channels nominal**, ~16 active
+in calm conditions, degrading further as storms thicken. Player
+allocates the surviving channels to whichever rovers / sensor
+streams matter most:
+
+> *"Cut radiation reads on rover-2 and rover-3, keep the bump
+> sensors on all four so they can at least navigate."*
+
+Storms become a *spectrum* of communication failure rather than a
+binary. Low-bandwidth sensors stay alive in heavy storms; high-
+bandwidth ones die first. Onboard-column rovers are immune to
+this entire failure mode — they don't need the link.
+
+### Beacon pattern recognition unlocks via column attachment
+
+The hopper's RF beacon detector starts as a *raw* direction-finder
+(picks up signals, no pattern recognition). Attaching a column to
+the RF stream unlocks **pulse-pattern recognition**:
+
+- Each beacon (ancient or player-placed) pulses to save energy,
+  with a temporal signature unique to its type / model / age.
+- The Monty-augmented RF receiver decomposes the **SDR beacon
+  chord** from a base — multiple structures' overlapping
+  pulse signatures — into constituent patterns.
+- Late-game payoff: the mothership "hears what's down there" via
+  the chord alone, identifying base composition before any probe
+  lands.
+- Beacon patterns are *learned*, long to converge, deeply
+  informative at maturity. Mature RF atlas gives the player
+  probabilistic priors about every region the eye drifts over.
+
+Cross-modal binding works the usual way: an RF pulse-pattern bound
+to a visual Foundry signature lets either modality identify
+Foundries.
+
+This is also the canonical example of *"attach a column somewhere
+unexpected, get a new capability."* Player feels the cortical-
+column generality the first time they install one on the RF
+detector and the temporal patterns suddenly start resolving.
+
+---
+
 ## Tile Vocabulary
 
 Collapsed dramatically from v3. The lesson is composition, not
@@ -338,6 +647,23 @@ details. They're what distinguishes two instances of the same
 archetype: same Foundry shape, but one has the door on the east
 wall and the other on the west.
 
+### Structures have vertical layers
+
+Walls and corners aren't single-level — structures span multiple
+height layers (footprint at layer 1, roof edge at layer 2, antenna
+or peak at layer 3, etc.). Sub-features attach at specific heights
+(vents low, antennas high, damage scuffs anywhere). Different
+sensors see different layers:
+
+- Rover bump / geo probe: ground-line features only
+- Drone height range-finder: top features (whatever pokes above
+  the sand line)
+- Mag / GPR / seismic: read through ground, including below current
+  sand level
+
+This enables **partial burial recognition** — see Sand Burial
+below.
+
 ---
 
 ## Composition Tiers
@@ -365,6 +691,24 @@ one Foundry-cluster has its hab door east, another west. T2
 recognition resolves the *archetype*. T1 details disambiguate
 *which specific instance*. Top-down prior plus bottom-up
 refinement, no adversarial framing needed.
+
+### Higher tiers unlock transport, not just recognition
+
+Recognising a base individually (T1) doesn't tell you *what's near
+it*. To route a rover from Foundry-3 to Hab-7, you need to know
+their relative positions — and that lives in the higher-tier
+atlas:
+
+- **T1 only**: each base is recognised in isolation. Travel between
+  them requires fresh recon flights to discover relative positions.
+- **T2 atlas**: "Foundry-3 and Hab-7 are in the same district at
+  known offsets." Rover routing between them becomes possible.
+- **T3 atlas**: "this district sits near another district at known
+  regional offset." Long-haul inter-district routes.
+
+The hierarchy isn't just teaching, it's *unlocking transport
+capability*. T2 enables base-to-base rover networks; T3 enables
+the late-game logistics chain.
 
 ---
 
@@ -441,6 +785,81 @@ mothership wakes up over significantly different terrain. This is
 the kidnapped-robot puzzle in full force — but it doesn't happen
 every storm, only on rare flares. Smaller drift between storms is
 continuous (brownian). Major drift is discontinuous and dramatic.
+
+---
+
+## Sand Burial — The Drifting Home Base
+
+The world has a continuous **sand-depth field** that the storm
+reshapes over time. Sand drifts; structures get covered; previously
+unknown structures get uncovered. The atlas isn't drift-free even
+if you do nothing — the world itself moves under your model.
+
+### Height encoding
+
+Sand depth lives on a 32-step scale, roughly:
+
+- 4 layers above ground (visible structure heights)
+- ~16 layers below ground (burial depth steps)
+
+Visible burial buckets: **unburied → sorta covered → half covered
+→ nearly covered → covered**. Structures' upper layers stick out of
+shallow burial; their footprint stays hidden. Combined with the
+multi-layer structures (see Tile Vocabulary), this gives partial-
+match recognition states.
+
+### Burial dynamics
+
+Sand depth is a **low-octave Perlin field** painted over the world,
+with intensity correlated with storm position:
+
+- **Near the eye**: shallow changes, slow drift. The current eye
+  area is naturally protected.
+- **Far from the eye / inside the storm**: large coherent patches
+  shift, rotate with storm currents, can change rapidly.
+- Field updates incrementally per turn.
+
+This means: while the eye is over your home base, sand stays
+roughly put. Once the eye drifts away and your old base sits in
+the storm, sand drift goes wild in that area.
+
+### The slow-drift home-base-becomes-buried arc
+
+The single strongest narrative beat of the campaign. Sequence:
+
+- **Early game**: eye barely moves. Player invests in a home base
+  near the eye. Emotional investment.
+- **Mid game**: eye drifts. Home base slips toward the dust.
+- **Late game**: home base behind the storm wall, possibly buried.
+  Magnetometer / GPR / excavator-equipped rovers needed to
+  re-find your own home.
+
+That last beat is the Monty payoff with personal weight. The
+player's relationship to their atlas shifts: not just "places I've
+been" but "places I'm losing track of." Recognising your own old
+base via subsurface signatures is the emotional centre of the late
+game.
+
+### Side effects of sand on sensors
+
+- **Geo probe on top of thin sand cover**: returns a weird material
+  reading (concrete substrate under sand) rather than just sand —
+  incidental detection of buried structures.
+- **Drone height range-finder**: measures top-of-sand and top-of-
+  structure, both. Tracking change in either reveals burial /
+  unburying over time.
+- **Mag / GPR / seismic**: read through sand cleanly. The primary
+  tools once burial is real.
+
+### Partial-burial recognition is a Monty teaching beat
+
+Half-buried structure: top features (high sub-features, wall-tops)
+match the atlas; bottom features (footprint, perimeter, low sub-
+features) hidden. The LM produces mixed-evidence recognition:
+*"Foundry-3 with burial, depth ~3 units"* reconciles all evidence
+cleanly. New feature channel (burial depth) on existing graph
+nodes. Mag/GPR is the disambiguator that confirms the lower portion
+is still the Foundry-3 footprint.
 
 ---
 
@@ -622,6 +1041,47 @@ infrastructure. Difficulty rises *because the player's needs grow*,
 not because the world changes — the cleanest progression curve
 this design considered.
 
+### Tier 0 (raid) → Tier 1 (manufacture)
+
+Throughout most of the campaign, the **ghost-town economy is
+sufficient**: raid existing buildings for parts, fuel, coolant,
+etc. The civilisation that left this place stocked it. You don't
+build; you steal.
+
+Only towards the end-game, when raided depots are depleted enough
+that the supply can't keep up, does **Tier 1 manufacturing** come
+online. Minimum-complexity Factorio-flavoured loop:
+
+- **Mines**: extract raw resources (metal ore, oil) from deposit
+  tiles. Fixed yield per turn; if you want more throughput you
+  build *more mines* in more places, not bigger mines.
+- **Refineries**: raw → refined material (metal, fuel). Need
+  power.
+- **Factories**: refined material + blueprint → output (probes,
+  sensors, rover modules, structures).
+- **Labs**: produce blueprints by reverse-engineering recovered
+  probes (one reverse-engineering at a time per lab). To keep
+  producing, you have to re-find the lab across storms — atlas
+  recognition becomes the supply chain.
+- **Power**: oil-burning generators or (late-late) reactors.
+- **Transport**: cargo-outfitted rovers (trucks). Throughput =
+  rovers per round-trip per turn. Closer mine = faster round trip,
+  fewer rovers required. Distant mine = more rovers for the same
+  rate.
+
+Mine sites are *located by sensor* (magnetometer for metal
+anomalies, geo probe for ore strata, chemical sniffer for oil
+seeps), so even the economy is gated by recognition. You can't
+build a mine until your atlas knows where to put it.
+
+### Excavator rovers
+
+A rover variant outfitted with a digging tool. Used to **unbury
+previously-known structures** after sand drift covers them. The
+atlas remembers the structure; mag/GPR finds it through the sand;
+the excavator clears it for re-use. Critical for late-game home-
+base recovery.
+
 ---
 
 ## The Scanner — Disagreement Overlay
@@ -642,6 +1102,76 @@ with different colours are gold.
 This matches what real Monty's goal-state generator computes. In
 the late-game automation phase, the LM picks the next scan tile
 itself — same algorithm, no player click in the loop.
+
+---
+
+## Pathfinding — A* and Monty
+
+Pathfinding is a separate algorithm from Monty (standard A* on hex
+grids), but Monty *feeds* it. Several useful pairings:
+
+### Curiosity-driven exploration
+
+The disagreement overlay scores each reachable tile by information
+gain. A* turns those scores into a **route** rather than a single
+target:
+
+- Greedy: rover always heads toward the nearest high-info tile,
+  recomputes after each scan. Reactive — better when the
+  disagreement map shifts rapidly as new evidence comes in.
+- TSP-style tour: rover plans a sweep through the top-N highest-
+  scoring tiles. Better when the map is stable.
+
+This turns Monty's "where should I look next" into a multi-step
+plan the rover executes autonomously. Player action becomes "send
+rover on a curiosity sweep, budget N scans." The rover does the
+rest.
+
+In the manual-to-automatic delegation arc, this is exploration
+itself getting delegated:
+
+- Early game: player picks each tile manually from the disagreement
+  overlay
+- Mid game: player picks a target tile; rover routes there via A*
+- Late game: player says "go scan curiously for a while"; rover
+  plans a multi-step route and executes
+
+### Predictive A\* using hypothesis state
+
+A* doesn't only use *observed* obstacles — it uses Monty's
+*predicted* obstacles. If the top hypothesis says "this is
+Foundry-3," the LM predicts where Foundry-3's walls should be in
+the unscanned region. A* routes around those predicted walls even
+before they've been confirmed. Confidence weights the cost:
+
+- High-confidence hypothesis → predicted obstacle is hard
+- Low-confidence → soft cost penalty
+- Multi-hypothesis → cost is the max across plausible predictions
+  (conservative routing)
+
+Practical effect: **navigation gets faster as recognition gets
+better.** Early in an inference episode, rovers route
+conservatively. Late in the same episode, with confident
+hypotheses, rovers cut through predicted-but-unconfirmed regions
+efficiently. Monty's recognition pays off twice — once for
+identification, again for routing.
+
+### Multi-rover Voronoi assignment
+
+When multiple rovers are out scanning, naive plans send them all
+toward the same high-info tile. Cleaner: partition the curiosity
+map by rover position (Voronoi-like) so each rover handles its own
+cell.
+
+- Compute each rover's cost-to-reach for each candidate target
+- Solve the assignment problem (Hungarian algorithm or greedy)
+  to minimise total path cost across the swarm
+- Each rover runs its own A* to its assigned target
+
+For the late-game ant-colony swarm this is load-bearing — without
+coordination, dozens of rovers clump together. With Voronoi
+assignment, the colony's effective scan rate scales with rover
+count.
 
 ---
 
@@ -908,14 +1438,21 @@ material features get retired.
 
 ## Open Questions
 
+- **Turn-based vs realtime** — current leaning is turn-based with
+  continuous game-time, but undecided. Re-discuss before locking.
 - **Eye radius** in tiles? Maybe 8–12 tile radius for a working
   scale. Wants playtest.
-- **Eye drift speed?** Slow enough to plan around, fast enough
-  that staying put isn't an option. Tunable parameter.
+- **Eye drift speed curve.** Slow enough early-game for the
+  tutorial to land before the player gets lost; ramps up over the
+  campaign so the home base eventually drifts out of the eye.
+  Exact curve TBD.
 - **Storm pulse cadence?** Soft turn counter so the player always
   knows how much budget remains, with rare unpredictable spikes.
 - **Probe count cap per excursion** at MVP scale? Three feels
   right; grows to 9–12 by late game.
+- **Lab disassembly time** — turns per blueprint. Slow enough that
+  the lab being lost or buried between sessions matters. Exact
+  value TBD.
 - **Procedural generation, layered.** Map is fully procedural with
   hand-authored tutorial structures plopped near the player start
   so they have fuel etc. Generation layers: Ground → Structures →
@@ -923,11 +1460,12 @@ material features get retired.
   sets. Structure generators may need brute-force or wave-function-
   collapse to ensure shapes close — implementation detail to
   decide later.
-- **Probe sensing radius.** Varies by sensor (geology = own tile,
-  local sonar = adjacent tiles, etc.). Goes into the sensor-design
-  discussion.
-- **Crawler speed.** Slow enough to feel deliberate, fast enough
-  to not be tedious. Tunable.
+- **Crawler / rover speed.** Slow enough to feel deliberate, fast
+  enough to not be tedious. Tunable.
+- **Sand drift rate.** How fast the Perlin field shifts per turn.
+  Tunable; affects how quickly buried structures change state.
+- **Mine yield rate.** Fixed per turn, but the exact number per
+  resource type wants playtest.
 - **How does the ear-LM display its temporal graphs?** Needs
   prototyping.
 - **Sound design.** Acoustic-ping per tile, modality chord per
@@ -938,11 +1476,64 @@ material features get retired.
 
 ---
 
+## Development Methodology — Testbed First
+
+The first build target is **not the MVP campaign** — it is three
+in-engine test spaces that exist from day one and grow as
+mechanics get implemented. The documentation *is* the testbed; no
+mechanic counts as done until it shows up there.
+
+### The three spaces
+
+- **Gym** — player abilities and controls. Exact ranges of rover
+  movement, hopper flight model, sensor inputs, beacon range
+  curves, radio bandwidth degradation, sand-depth traversal. The
+  feel of every player action gets pinned down in the gym before
+  it lands in any campaign content.
+- **Zoo** — structure and asset archetypes. Every Hab, Foundry,
+  Lab archetype rendered at maximum legibility in one space.
+  Sub-feature variants visible side by side. Sand-burial states
+  shown on the same archetype at different depths. Doubles as the
+  recognition test bench: point a column at the zoo and watch it
+  identify everything.
+- **Museum** — algorithmic phenomena. Static demonstrations of
+  Monty behaviour — hypothesis funnels collapsing, lateral voting
+  exchanges, cross-modal binding moments, temporal-axis pattern
+  recognition, hierarchy cascade across tiers. Things normally
+  seen as fleeting HUD events, paused and labelled. Also where
+  speculative-tier visualisations live.
+
+### Why this order
+
+- **Visual verification.** Every behaviour is observable in a
+  controlled space. No trusting prose summaries or diff reading.
+- **Drift catching.** When a change breaks something, the
+  relevant testbed entry shows it immediately.
+- **No invisible mechanics.** A mechanic without a testbed entry
+  isn't done. Forces internal state to be observable.
+- **Working relationship.** Brilliant-fast collaborator means
+  fast-moving codebase; the testbed keeps the human in the loop
+  with a verifiable surface to look at after each change.
+
+### Operating rule
+
+**Every new mechanic gets a testbed entry the moment it is
+implemented.** The MVP campaign is assembled downstream from a
+testbed of working pieces, not parallel to it.
+
+---
+
 ## Implementation Order
 
-A working MVP can ship behind step 4. Each later step is one
-self-contained mechanic layered on top.
+Testbed-first (see Development Methodology above). A working MVP
+can ship behind step 5. Each implementation step lands a mechanic
+*into the testbed*; the campaign is assembled later from pieces
+already proven there.
 
+0. **Testbed shells.** Three navigable in-engine spaces (gym,
+   zoo, museum) accessible from a debug menu. Empty hex-grid
+   floors with camera controls. Each subsequent step adds to one
+   or more of them.
 1. Dust-plain renderer (single eye region, no drift yet) with
    hex grid, sand-dominant terrain, and the 3 structure tile types.
 2. WASD probe + one sensor. Press space to scan current tile.
@@ -977,8 +1568,7 @@ self-contained mechanic layered on top.
 
 ## What's Not Here Yet
 
-- **Full sensor design** — sensor types, ranges, modes (passive vs
-  active), and operator assignments are deliberately unresolved.
-  Next discussion thread.
 - **Speculative reference-frame tiers** (state-transition,
   theory-of-mind) are placeholders pending a later design pass.
+- **Turn-based vs realtime timing** — leaning turn-based but
+  flagged open in the Premise; revisit.
